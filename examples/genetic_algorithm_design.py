@@ -273,8 +273,8 @@ def main():
     print("\n运行遗传算法优化...")
     ga_result = run_genetic_algorithm_optimization(
         simulator=simulator,
-        pop_size=50,
-        num_generations=100,
+        pop_size=200,
+        num_generations=500,
         mutation_rate=0.1,
         init_mode="random"
     )
