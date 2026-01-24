@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from typing import Dict, Any
 
 from meep_simulator import MMISimulator, load_simulation_config, GreedyOptimizer
+from utils import visualize_results
 
 
 def setup_simulator(config_path: str = None) -> MMISimulator:
@@ -42,10 +43,10 @@ def plot_history(history: Dict[str, Any], save_path: str = None):
     generations = range(len(history["best_fitness"]))
 
     plt.figure(figsize=(8, 5))
-    plt.plot(generations, history["best_fitness"], label="最优适应度", linewidth=2)
-    plt.xlabel("步数")
-    plt.ylabel("适应度")
-    plt.title("贪心算法收敛曲线")
+    plt.plot(generations, history["best_fitness"], label="Best Fitness", linewidth=2)
+    plt.xlabel("Step")
+    plt.ylabel("Fitness")
+    plt.title("Greedy Algorithm Convergence")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
@@ -57,14 +58,14 @@ def plot_history(history: Dict[str, Any], save_path: str = None):
     plt.show()
 
 
-def plot_structure(structure: np.ndarray, title: str = "贪心优化结构", save_path: str = None):
+def plot_structure(structure: np.ndarray, title: str = "Greedy Optimized Structure", save_path: str = None):
     fig, ax = plt.subplots(figsize=(10, 6))
     display = structure.T[::-1]
     im = ax.imshow(display, cmap="gray", aspect="auto", origin="lower")
-    ax.set_xlabel("X方向单元索引")
-    ax.set_ylabel("Y方向单元索引")
+    ax.set_xlabel("X (cells)")
+    ax.set_ylabel("Y (cells)")
     ax.set_title(title)
-    plt.colorbar(im, ax=ax, label="材料 (0=SiO2, 1=Si)")
+    plt.colorbar(im, ax=ax, label="Material (0=SiO2, 1=Si)")
 
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -79,7 +80,19 @@ def main():
     result = run_greedy(simulator, max_steps=200, patience=20)
 
     plot_history(result["history"], save_path="./greedy_history.png")
-    plot_structure(result["best_structure"], title="贪心算法优化后的MMI PBS结构", save_path="./greedy_structure.png")
+    plot_history(result["history"], save_path="./greedy_history.png")
+    
+    # 保存最佳结构和仿真结果图
+    print(f"正在保存最佳结果可视化...")
+    visualize_results(
+        results=result["best_result"],
+        structure=result["best_structure"],
+        save_path="./greedy_best_result.png",
+        show=False
+    )
+    print(f"结果图已保存到: ./greedy_best_result.png")
+    
+    # plot_structure(result["best_structure"], title="贪心算法优化后的MMI PBS结构", save_path="./greedy_structure.png")
 
     print("\n最优适应度: {:.4f}".format(result["best_fitness"]))
     best = result["best_result"]

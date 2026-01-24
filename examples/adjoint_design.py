@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, Any, Optional
+from utils import visualize_results
 
 from meep_simulator import MMISimulator, load_simulation_config, SimulationResult
 
@@ -261,7 +262,7 @@ def run_adjoint_optimization(
         verbose=True
     )
     
-    return optimizer.optimize(init_mode=init_mode)
+    return optimizer.optimize(init_mode="half")
 
 
 def evaluate_structure(simulator: MMISimulator, structure: np.ndarray) -> Dict[str, float]:
@@ -307,39 +308,39 @@ def plot_optimization_history(adjoint_result: Dict[str, Any], save_path: str = N
     
     # 适应度演化
     ax = axes[0, 0]
-    ax.plot(iterations, history["fitness"], 'r-', label="适应度", linewidth=2)
-    ax.set_xlabel("迭代次数")
-    ax.set_ylabel("适应度")
-    ax.set_title("伴随法 - 适应度演化")
+    ax.plot(iterations, history["fitness"], 'r-', label="Fitness", linewidth=2)
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel("Fitness")
+    ax.set_title("Adjoint Method - Fitness Evolution")
     ax.grid(True, alpha=0.3)
     ax.legend()
     
     # TE→Port1和TM→Port2效率
     ax = axes[0, 1]
-    ax.plot(iterations, history["te_port1"], 'b-', label="TE→Port1", linewidth=2)
-    ax.plot(iterations, history["tm_port2"], 'g-', label="TM→Port2", linewidth=2)
-    ax.set_xlabel("迭代次数")
-    ax.set_ylabel("效率")
-    ax.set_title("目标端口效率演化")
+    ax.plot(iterations, history["te_port1"], 'b-', label="TE->Port1", linewidth=2)
+    ax.plot(iterations, history["tm_port2"], 'g-', label="TM->Port2", linewidth=2)
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel("Efficiency")
+    ax.set_title("Port Efficiency Evolution")
     ax.grid(True, alpha=0.3)
     ax.legend()
     
     # 总效率和串扰
     ax = axes[1, 0]
-    ax.plot(iterations, history["total_efficiency"], 'g-', label="总效率", linewidth=2)
-    ax.plot(iterations, history["crosstalk"], 'r-', label="总串扰", linewidth=2)
-    ax.set_xlabel("迭代次数")
-    ax.set_ylabel("效率")
-    ax.set_title("总效率与串扰")
+    ax.plot(iterations, history["total_efficiency"], 'g-', label="Total Eff", linewidth=2)
+    ax.plot(iterations, history["crosstalk"], 'r-', label="Crosstalk", linewidth=2)
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel("Efficiency")
+    ax.set_title("Total Efficiency vs Crosstalk")
     ax.grid(True, alpha=0.3)
     ax.legend()
     
     # 梯度范数
     ax = axes[1, 1]
     ax.semilogy(iterations, history["gradient_norm"], 'purple', linewidth=2)
-    ax.set_xlabel("迭代次数")
-    ax.set_ylabel("梯度范数（对数）")
-    ax.set_title("梯度收敛情况")
+    ax.set_xlabel("Iterations")
+    ax.set_ylabel("Gradient Norm (Log)")
+    ax.set_title("Gradient Convergence")
     ax.grid(True, alpha=0.3, which="both")
     
     plt.tight_layout()
@@ -351,7 +352,7 @@ def plot_optimization_history(adjoint_result: Dict[str, Any], save_path: str = N
     plt.show()
 
 
-def plot_structure(structure: np.ndarray, title: str = "优化结构", save_path: str = None):
+def plot_structure(structure: np.ndarray, title: str = "Optimized Structure", save_path: str = None):
     """
     绘制结构可视化
     
@@ -366,10 +367,10 @@ def plot_structure(structure: np.ndarray, title: str = "优化结构", save_path
     structure_display = structure.T[::-1]  # Y轴反向
     
     im = ax.imshow(structure_display, cmap='gray', aspect='auto', origin='lower')
-    ax.set_xlabel("X方向单元索引")
-    ax.set_ylabel("Y方向单元索引")
+    ax.set_xlabel("X (cells)")
+    ax.set_ylabel("Y (cells)")
     ax.set_title(title)
-    plt.colorbar(im, ax=ax, label="材料 (0=SiO2, 1=Si)")
+    plt.colorbar(im, ax=ax, label="Material (0=SiO2, 1=Si)")
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -438,9 +439,19 @@ def main():
     plot_optimization_history(adjoint_result, save_path="./adjoint_optimization_history.png")
     plot_structure(
         adjoint_result["best_structure"],
-        title="伴随法优化后的MMI PBS结构",
+        title="Adjoint Optimized PBS Structure",
         save_path="./adjoint_optimized_structure.png"
     )
+
+    # 4.b 保存最佳结构和仿真结果组合图
+    print(f"正在保存最佳结果可视化...")
+    visualize_results(
+        results=adjoint_result["best_result"],
+        structure=adjoint_result["best_structure"],
+        save_path="./adjoint_best_result.png",
+        show=False
+    )
+    print(f"结果图已保存到: ./adjoint_best_result.png")
     
     # 5. 保存结果
     os.makedirs("./results", exist_ok=True)

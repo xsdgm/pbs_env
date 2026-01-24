@@ -23,7 +23,7 @@ materials:
 # 仿真参数 (速度优先)
 simulation:
   resolution: 10   # 网格分辨率 (pixels/μm)
-  run_time: 50     # 仿真时间
+  run_time: 200     # 仿真时间
   pml_thickness: 1.0  # PML厚度
 
 # 并行参数

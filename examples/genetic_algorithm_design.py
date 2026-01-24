@@ -109,17 +109,17 @@ def plot_optimization_history(ga_result: Dict[str, Any], save_path: str = None):
     # 适应度演化
     ax1 = axes[0]
     generations = range(len(history["best_fitness"]))
-    ax1.plot(generations, history["best_fitness"], 'b-', label="最优适应度", linewidth=2)
+    ax1.plot(generations, history["best_fitness"], 'b-', label="Best Fitness", linewidth=2)
     ax1.fill_between(
         generations,
         np.array(history["avg_fitness"]) - np.array(history["std_fitness"]),
         np.array(history["avg_fitness"]) + np.array(history["std_fitness"]),
         alpha=0.3,
-        label="平均±标准差"
+        label="Mean +/- Std"
     )
-    ax1.set_xlabel("演化代数")
-    ax1.set_ylabel("适应度")
-    ax1.set_title("遗传算法 - 适应度演化")
+    ax1.set_xlabel("Generations")
+    ax1.set_ylabel("Fitness")
+    ax1.set_title("Genetic Algorithm - Fitness Evolution")
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
@@ -128,10 +128,10 @@ def plot_optimization_history(ga_result: Dict[str, Any], save_path: str = None):
     best_result = ga_result["best_result"]
     
     metrics = [
-        "TE→P1",
-        "TE→P2",
-        "TM→P1",
-        "TM→P2"
+        "TE->P1",
+        "TE->P2",
+        "TM->P1",
+        "TM->P2"
     ]
     values = [
         best_result.te_port1,
@@ -142,10 +142,10 @@ def plot_optimization_history(ga_result: Dict[str, Any], save_path: str = None):
     colors = ['green', 'red', 'red', 'green']
     
     bars = ax2.bar(metrics, values, color=colors, alpha=0.7, edgecolor='black')
-    ax2.set_ylabel("效率")
-    ax2.set_title("最优结构性能指标")
+    ax2.set_ylabel("Efficiency")
+    ax2.set_title("Best Structure Performance")
     ax2.set_ylim([0, 1])
-    ax2.axhline(y=0.5, color='k', linestyle='--', alpha=0.3, label="目标值")
+    ax2.axhline(y=0.5, color='k', linestyle='--', alpha=0.3, label="Target")
     
     # 在柱子上显示数值
     for bar, val in zip(bars, values):
@@ -196,7 +196,7 @@ def compare_random_vs_optimized(simulator: MMISimulator, optimized_structure: np
             print(f"{key:<25} {rand_val:>14.4f} {opt_val:>14.4f} {improvement:>+14.4f}")
 
 
-def plot_structure(structure: np.ndarray, title: str = "MMI PBS结构", save_path: str = None):
+def plot_structure(structure: np.ndarray, title: str = "MMI PBS Structure", save_path: str = None):
     """
     绘制结构可视化
     
@@ -211,10 +211,10 @@ def plot_structure(structure: np.ndarray, title: str = "MMI PBS结构", save_pat
     structure_display = structure.T[::-1]  # Y轴反向
     
     im = ax.imshow(structure_display, cmap='gray', aspect='auto', origin='lower')
-    ax.set_xlabel("X方向单元索引")
-    ax.set_ylabel("Y方向单元索引")
+    ax.set_xlabel("X (cells)")
+    ax.set_ylabel("Y (cells)")
     ax.set_title(title)
-    plt.colorbar(im, ax=ax, label="材料 (0=SiO2, 1=Si)")
+    plt.colorbar(im, ax=ax, label="Material (0=SiO2, 1=Si)")
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -286,8 +286,18 @@ def main():
     print("\n生成可视化...")
     plot_optimization_history(ga_result, save_path="./ga_optimization_history.png")
     plot_structure(ga_result["best_individual"], 
-                  title="遗传算法优化后的MMI PBS结构",
+                  title="Genetic Algorithm Optimized Structure",
                   save_path="./ga_optimized_structure.png")
+                  
+    # 4.b 保存最佳结构和仿真结果组合图 (使用集成方法)
+    print(f"正在保存最佳结果可视化...")
+    simulator.visualize_results(
+        results=ga_result["best_result"],
+        structure=ga_result["best_individual"],
+        save_path="./ga_best_result.png",
+        show=False
+    )
+    print(f"结果图已保存到: ./ga_best_result.png")
     
     # 5. 保存结果
     save_results_to_file(ga_result, save_dir="./results")

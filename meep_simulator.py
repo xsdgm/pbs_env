@@ -37,11 +37,15 @@ class SimulationConfig:
     # 仿真参数
     resolution: int = 10  # 网格分辨率 (pixels/μm)
     pml_thickness: float = 1.0  # PML厚度
-    run_time: float = 50  # 仿真时间 (in units of 1/frequency)
+    run_time: float = 200  # 仿真时间 (in units of 1/frequency)
     
     # 网格参数
     n_cells_x: int = 30  # MMI区域X方向网格数
     n_cells_y: int = 8  # MMI区域Y方向网格数
+    
+    # EIM 参数
+    use_eim: bool = True  # 是否使用等效折射率方法
+    slab_thickness: float = 0.22  # 平板波导厚度 (μm) (同 thickness, 明确语义)
 
 
 def load_simulation_config(config_path: Optional[str] = None) -> Tuple[SimulationConfig, int]:
@@ -78,6 +82,8 @@ def load_simulation_config(config_path: Optional[str] = None) -> Tuple[Simulatio
         run_time=g("simulation", "run_time", SimulationConfig.run_time),
         n_cells_x=g("structure", "n_cells_x", SimulationConfig.n_cells_x),
         n_cells_y=g("structure", "n_cells_y", SimulationConfig.n_cells_y),
+        use_eim=g("simulation", "use_eim", SimulationConfig.use_eim),
+        slab_thickness=g("geometry", "thickness", SimulationConfig.slab_thickness),
     )
 
     num_workers = g("parallel", "num_workers", 12)
@@ -165,31 +171,130 @@ class MMISimulator(Simulator):
             metadata=results
         )
     
+    def get_effective_index(self, n_core: float, n_clad: float, thickness: float, polarization: str, wavelength: float) -> float:
+        """
+        计算平板波导的有效折射率 (Effective Index Method)
+        
+        Args:
+            n_core: 芯层折射率
+            n_clad: 包层折射率 (假定上下包层相同，对称波导)
+            thickness: 波导厚度 (um)
+            polarization: "te" or "tm" (Chip polarization)
+                          TE: Electric field parallel to slab (Ey predominantly)
+                          TM: Electric field perpendicular to slab (Ez predominantly, but in slab mode analysis usually called TM)
+                          NOTE: 
+                          - In slab analysis: 
+                            - TE modes have E parallel to interface (Iy) -> n_eff ~ 2.8 for Si
+                            - TM modes have H parallel to interface (Ix) -> n_eff ~ 1.8 for Si
+            wavelength: 工作波长 (um)
+            
+        Returns:
+            effective index
+        """
+        # 简单求解超越方程 or 使用近似公式
+        # 这里使用简单的近似或二分法求解对称平板波导
+        
+        k0 = 2 * np.pi / wavelength
+        
+        # 定义色散方程残差函数
+        def dispersion_func(n_eff):
+            if n_eff <= n_clad or n_eff >= n_core:
+                return 1.0 # Invalid
+            
+            k0_h = k0 * thickness
+            u = k0_h * np.sqrt(n_core**2 - n_eff**2)
+            v = k0_h * np.sqrt(n_eff**2 - n_clad**2)
+            
+            if polarization.lower() == "te":
+                # TE mode (E parallel to slab)
+                # tan(u/2) = v/u (even modes, fundamental is even)
+                return np.tan(0.5 * u) - v / u
+            else:
+                # TM mode (H parallel to slab)
+                # tan(u/2) = (n_core^2/n_clad^2) * (v/u)
+                return np.tan(0.5 * u) - (n_core**2 / n_clad**2) * (v / u)
+
+        # 二分查找 n_eff
+        # n_eff 范围 (n_clad, n_core)
+        low = n_clad + 1e-4
+        high = n_core - 1e-4
+        
+        # 快速迭代
+        for _ in range(20):
+            mid = (low + high) / 2
+            val = dispersion_func(mid)
+            if val > 0:
+                # 对于 tan(u/2), 当 n_eff 增大 -> u 减小 -> tan(u/2) 减小. v 增加.
+                # func = tan - v/u.  n_eff UP => func DOWN.
+                # val > 0 => func too big => n_eff too small
+                if polarization.lower() == "te":
+                    high = mid # Wait. Let's check slope.
+                    # u decreases with n_eff. v increases with n_eff.
+                    # R.H.S (v/u) increases with n_eff.
+                    # L.H.S (tan(u/2)) decreases with n_eff.
+                    # f = LHS - RHS. f decreases as n_eff increases.
+                    # if f > 0, we need to increase n_eff to decrease f.
+                    low = mid
+                else:
+                    low = mid
+            else:
+                high = mid
+                
+        return (low + high) / 2
+
     def _run_single_pol(self, structure: np.ndarray, pol: str) -> Dict[str, float]:
         """
         运行单一偏振仿真
+        
+        CRITICAL UPDATE FOR ON-CHIP SIMULATION:
+        1. Polarization Mapping:
+           - On-Chip TE (E parallel to chip) -> Meep Hz (TM mode in 2D)
+           - On-Chip TM (E perp to chip)     -> Meep Ez (TE mode in 2D)
+        
+        2. Effective Index Method:
+           - Materials are defined by n_eff calculated for the specific thickness and polarization.
         """
         mp = self.mp
         cfg = self.config
+        
+        # 计算有效折射率
+        if cfg.use_eim:
+            # Calculate n_eff for Core (Si) and Cladding (SiO2)
+            # 注意: 这里计算的是平板模式的 n_eff
+            # Core regions have Si slab. Cladding regions have thickness but SiO2 material? 
+            # 通常 2D 仿真: 
+            # - "Core" material = n_eff(Si slab in SiO2 bg)
+            # - "Cladding" material = n_eff(SiO2 slab) ... 实际上就是 n_sio2 体材料
+            #   或者近似为 n_sio2，因为通常刻蚀区域是完全刻穿或者剩下的也是SiO2
+            
+            n_eff_si = self.get_effective_index(cfg.n_si, cfg.n_sio2, cfg.thickness, pol, cfg.wavelength)
+            n_eff_sio2 = cfg.n_sio2 # Background is typically SiO2 cladded
+            
+            # 使用计算出的有效折射率
+            n_core_sim = n_eff_si
+            n_bg_sim = n_eff_sio2
+        else:
+            n_core_sim = cfg.n_si
+            n_bg_sim = cfg.n_sio2
         
         # 计算仿真区域尺寸
         sx = cfg.mmi_length + 2 * cfg.wg_length + 2 * cfg.pml_thickness
         sy = cfg.mmi_width + 2 * cfg.pml_thickness
         
         # 创建材料
-        Si = mp.Medium(index=cfg.n_si)
-        SiO2 = mp.Medium(index=cfg.n_sio2)
+        MatCore = mp.Medium(index=n_core_sim)
+        MatBg = mp.Medium(index=n_bg_sim)
         
         # 定义几何结构
         geometry = []
         
-        # 背景是SiO2（通过default_material设置）
+        # 背景是 MatBg (通过default_material设置)
         
         # 输入波导
         geometry.append(mp.Block(
             size=mp.Vector3(cfg.wg_length, cfg.wg_width, mp.inf),
             center=mp.Vector3(-sx/2 + cfg.pml_thickness + cfg.wg_length/2, 0, 0),
-            material=Si
+            material=MatCore
         ))
         
         # 输出波导1 (上方)
@@ -197,14 +302,14 @@ class MMISimulator(Simulator):
         geometry.append(mp.Block(
             size=mp.Vector3(cfg.wg_length, cfg.wg_width, mp.inf),
             center=mp.Vector3(sx/2 - cfg.pml_thickness - cfg.wg_length/2, output_y, 0),
-            material=Si
+            material=MatCore
         ))
         
         # 输出波导2 (下方)
         geometry.append(mp.Block(
             size=mp.Vector3(cfg.wg_length, cfg.wg_width, mp.inf),
             center=mp.Vector3(sx/2 - cfg.pml_thickness - cfg.wg_length/2, -output_y, 0),
-            material=Si
+            material=MatCore
         ))
         
         # MMI区域 - 根据structure数组构建
@@ -213,27 +318,49 @@ class MMISimulator(Simulator):
         mmi_start_x = -cfg.mmi_length / 2
         mmi_start_y = -cfg.mmi_width / 2
         
-        for i in range(cfg.n_cells_x):
-            for j in range(cfg.n_cells_y):
-                if structure[i, j] > 0.5:  # Si
-                    cx = mmi_start_x + (i + 0.5) * cell_dx
-                    cy = mmi_start_y + (j + 0.5) * cell_dy
-                    geometry.append(mp.Block(
-                        size=mp.Vector3(cell_dx, cell_dy, mp.inf),
-                        center=mp.Vector3(cx, cy, 0),
-                        material=Si
-                    ))
+        # 优化的几何构建 (mp.MaterialGrid or Blocks)
+        # 为保持一致性，如果使用了 MaterialGrid 的逻辑，应该调用 _build_geometry
+        # 但这里为了简单修改，我们先直接用 Blocks (或者后面统一用 _build_geometry)
+        # 让我们使用 _build_geometry，因为它已经存在并支持 MaterialGrid
+        
+        # geometry = self._build_geometry(structure, sx, sy, MatCore, MatBg, continuous=False)
+        # 但是 _run_single_pol 原来的逻辑是手动加 Block，_build_geometry 是后面定义的
+        # 我们暂时手动加 Block 保持最小改动，或者直接把那部分逻辑搬过来
+        
+        if True: # Use simple block loop for now as in original code snippet
+             for i in range(cfg.n_cells_x):
+                for j in range(cfg.n_cells_y):
+                    if structure[i, j] > 0.5:  # Si (Core)
+                        cx = mmi_start_x + (i + 0.5) * cell_dx
+                        cy = mmi_start_y + (j + 0.5) * cell_dy
+                        geometry.append(mp.Block(
+                            size=mp.Vector3(cell_dx, cell_dy, mp.inf),
+                            center=mp.Vector3(cx, cy, 0),
+                            material=MatCore
+                        ))
+        
         
         # 光源设置
         fcen = 1 / cfg.wavelength  # 中心频率
         
-        # 根据偏振选择源
+        # === CRITICAL POLARIZATION MAPPING ===
+        # ON-CHIP TE (E parallel to chip) -> MEEP 2D TM / Hz
+        # ON-CHIP TM (E perp to chip)     -> MEEP 2D TE / Ez
+        
         if pol == "te":
-            # TE: Ez polarization (out of plane)
-            src_component = mp.Ez
-        else:
-            # TM: Hz polarization
+            # On-Chip TE -> Meep: Hz polarization (Magnetic field out of plane)
+            # Corresponds to TE modes in integrated photonics (E_x, E_y, H_z)
+            # In Meep 2D, this is often called TM because H is out of plane? 
+            # No, wait. 
+            # Meep 2D Conventions:
+            # TE: Ez, Hx, Hy (E out of plane) -> Physical TM (E perp to chip)
+            # TM: Hz, Ex, Ey (H out of plane) -> Physical TE (E parallel to chip)
+            
             src_component = mp.Hz
+        else:
+            # On-Chip TM -> Meep: Ez polarization (Electric field out of plane)
+            # Physical TM (E perp to chip) -> Meep TE (Ez)
+            src_component = mp.Ez
         
         sources = [mp.Source(
             mp.ContinuousSource(frequency=fcen),
@@ -249,7 +376,7 @@ class MMISimulator(Simulator):
             sources=sources,
             boundary_layers=[mp.PML(cfg.pml_thickness)],
             resolution=cfg.resolution,
-            default_material=SiO2
+            default_material=MatBg
         )
         
         # 设置通量监测器
@@ -599,6 +726,117 @@ class MMISimulator(Simulator):
         
         return real_resampled + 1j * imag_resampled
 
+
+    
+    def visualize_results(
+        self,
+        results: Any,
+        structure: Optional[np.ndarray] = None,
+        figsize: Tuple[int, int] = (12, 5),
+        save_path: Optional[str] = None,
+        show: bool = True
+    ):
+        """
+        可视化仿真结果 (Efficiency Bar Chart + Optional Structure)
+        
+        Args:
+            results: 仿真结果字典或对象
+            structure: 结构数组（可选）
+            figsize: 图尺寸
+            save_path: 保存路径
+            show: 是否显示
+        """
+        import matplotlib.pyplot as plt
+        
+        if structure is not None:
+            fig, axes = plt.subplots(1, 2, figsize=figsize)
+            
+            # Left Plot: Structure
+            ax1 = axes[0]
+            # Transpose for correct visualization orientation relative to meep (if needed)
+            display_struct = structure.T[::-1] # Common convention for meep grids
+            im = ax1.imshow(
+                display_struct,
+                cmap="gray",
+                aspect="auto",
+                origin="lower",
+                vmin=0, 
+                vmax=1
+            )
+            ax1.set_xlabel("X (cells)")
+            ax1.set_ylabel("Y (cells)")
+            ax1.set_title("Optimized Structure")
+            plt.colorbar(im, ax=ax1, label="Material (0=SiO2, 1=Si)")
+            
+            # Right Plot: Efficiency Bar Chart
+            ax2 = axes[1]
+        else:
+            fig, ax2 = plt.subplots(figsize=(6, 5))
+        
+        # Draw Efficiency
+        labels = ["TE->P1", "TE->P2", "TM->P1", "TM->P2"]
+        
+        # Compatible with SimulationResult object and dict
+        if hasattr(results, "te_port1"):
+            values = [
+                results.te_port1,
+                results.te_port2,
+                results.tm_port1,
+                results.tm_port2
+            ]
+            total_eff = results.total_efficiency
+            crosstalk = results.crosstalk
+        else:
+            values = [
+                results.get("te_port1", 0),
+                results.get("te_port2", 0),
+                results.get("tm_port1", 0),
+                results.get("tm_port2", 0)
+            ]
+            total_eff = results.get("total_efficiency", 0)
+            crosstalk = results.get("crosstalk", 0)
+        
+        colors = ["green", "red", "red", "green"]  # Green=Target, Red=Crosstalk
+        
+        bars = ax2.bar(labels, values, color=colors, alpha=0.7, edgecolor='black')
+        ax2.set_ylabel("Efficiency")
+        ax2.set_title("Port Transmission Metrics")
+        ax2.set_ylim(0, 1.05)
+        
+        # Add values on bars
+        for bar, val in zip(bars, values):
+            ax2.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.02,
+                f"{val:.3f}",
+                ha='center',
+                va='bottom',
+                fontsize=10
+            )
+        
+        # Add Summary Text
+        ax2.text(
+            0.95, 0.95,
+            f"Total Eff: {total_eff:.3f}\n"
+            f"Crosstalk: {crosstalk:.3f}",
+            transform=ax2.transAxes,
+            ha='right',
+            va='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+        )
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Visualization saved to: {save_path}")
+        
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        
+        return fig
 
 def simulate_single_structure(args):
     """
