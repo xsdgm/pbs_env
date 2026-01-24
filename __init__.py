@@ -32,7 +32,7 @@ register(
     id="MeepMMIPBS-Fast-v0",
     entry_point="pbs_env.mmi_pbs_env:MeepMMIPBS",
     max_episode_steps=200,
-    kwargs={"resolution": 10, "run_time": 50},
+    # 分辨率和运行时间将从YAML配置读取，无需硬编码
 )
 
 

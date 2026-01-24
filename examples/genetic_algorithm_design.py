@@ -9,45 +9,22 @@
 
 import sys
 import os
+
+# 添加父目录到路径以导入pbs_env模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, Any
 
-from meep_simulator import MMISimulator, SimulationConfig, GeneticAlgorithmOptimizer
+from meep_simulator import MMISimulator, load_simulation_config, GeneticAlgorithmOptimizer
 from utils import compute_reward
 
 
-def setup_simulator(resolution: int = 10, run_time: float = 50) -> MMISimulator:
-    """
-    配置仿真器
-    
-    Args:
-        resolution: 仿真分辨率
-        run_time: 仿真时间
-    
-    Returns:
-        MMISimulator实例
-    """
-    config = SimulationConfig(
-        wavelength=1.55,
-        mmi_width=4.0,
-        mmi_length=15.0,
-        wg_width=0.5,
-        wg_length=2.0,
-        thickness=0.22,
-        n_si=3.48,
-        n_sio2=1.44,
-        resolution=resolution,
-        pml_thickness=1.0,
-        run_time=run_time,
-        n_cells_x=30,
-        n_cells_y=8
-    )
-    
-    simulator = MMISimulator(config=config, num_workers=12)
-    return simulator
+def setup_simulator(config_path: str = None) -> MMISimulator:
+    """从YAML加载配置并构建仿真器。"""
+    config, num_workers = load_simulation_config(config_path)
+    return MMISimulator(config=config, num_workers=num_workers)
 
 
 def run_genetic_algorithm_optimization(
@@ -76,8 +53,6 @@ def run_genetic_algorithm_optimization(
     
     ga_optimizer = GeneticAlgorithmOptimizer(
         simulator=simulator,
-        n_cells_x=30,
-        n_cells_y=8,
         pop_size=pop_size,
         num_generations=num_generations,
         mutation_rate=mutation_rate,
@@ -292,7 +267,7 @@ def main():
     """主函数"""
     # 1. 初始化仿真器
     print("初始化MEEP仿真器...")
-    simulator = setup_simulator(resolution=10, run_time=50)
+    simulator = setup_simulator()
     
     # 2. 运行遗传算法
     print("\n运行遗传算法优化...")

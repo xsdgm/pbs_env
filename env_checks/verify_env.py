@@ -71,14 +71,13 @@ def test_simulation():
     # Initialize Environment
     try:
         print("Initializing Environment...")
-        # Use low parameters for quick check
+        # 使用YAML配置（自动读取）
         env = MeepMMIPBS(
             n_cells_x=10, 
             n_cells_y=4, 
-            resolution=10, 
-            run_time=10.0, 
             num_workers=1,
             init_mode="random"
+            # resolution 和 run_time 将从YAML读取
         )
         print("Environment initialized.")
         

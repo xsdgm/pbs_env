@@ -6,32 +6,20 @@
 
 import sys
 import os
+
+# 添加父目录到路径以导入pbs_env
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, Any
 
-from meep_simulator import MMISimulator, SimulationConfig, GreedyOptimizer
+from meep_simulator import MMISimulator, load_simulation_config, GreedyOptimizer
 
 
-def setup_simulator(resolution: int = 10, run_time: float = 50) -> MMISimulator:
-    config = SimulationConfig(
-        wavelength=1.55,
-        mmi_width=4.0,
-        mmi_length=15.0,
-        wg_width=0.5,
-        wg_length=2.0,
-        thickness=0.22,
-        n_si=3.48,
-        n_sio2=1.44,
-        resolution=resolution,
-        pml_thickness=1.0,
-        run_time=run_time,
-        n_cells_x=30,
-        n_cells_y=8,
-    )
-    return MMISimulator(config=config, num_workers=12)
+def setup_simulator(config_path: str = None) -> MMISimulator:
+    config, num_workers = load_simulation_config(config_path)
+    return MMISimulator(config=config, num_workers=num_workers)
 
 
 def run_greedy(simulator: MMISimulator, max_steps: int = 200, patience: int = 20) -> Dict[str, Any]:
@@ -41,8 +29,6 @@ def run_greedy(simulator: MMISimulator, max_steps: int = 200, patience: int = 20
 
     optimizer = GreedyOptimizer(
         simulator=simulator,
-        n_cells_x=30,
-        n_cells_y=8,
         max_steps=max_steps,
         patience=patience,
         seed=42,
@@ -88,7 +74,7 @@ def plot_structure(structure: np.ndarray, title: str = "贪心优化结构", sav
 
 
 def main():
-    simulator = setup_simulator(resolution=10, run_time=50)
+    simulator = setup_simulator()
 
     result = run_greedy(simulator, max_steps=200, patience=20)
 

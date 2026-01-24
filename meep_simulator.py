@@ -8,9 +8,14 @@ import numpy as np
 from typing import Dict, Tuple, Optional, Any
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
+from pathlib import Path
+import yaml
 
-from .core import Simulator, SimulationResult
 from dataclasses import dataclass
+try:
+    from .core import Simulator, SimulationResult
+except ImportError:
+    from core import Simulator, SimulationResult
 
 
 
@@ -30,13 +35,53 @@ class SimulationConfig:
     n_sio2: float = 1.44  # 二氧化硅折射率
     
     # 仿真参数
-    resolution: int = 20  # 网格分辨率 (pixels/μm)
+    resolution: int = 10  # 网格分辨率 (pixels/μm)
     pml_thickness: float = 1.0  # PML厚度
-    run_time: float = 100  # 仿真时间 (in units of 1/frequency)
+    run_time: float = 50  # 仿真时间 (in units of 1/frequency)
     
     # 网格参数
     n_cells_x: int = 30  # MMI区域X方向网格数
     n_cells_y: int = 8  # MMI区域Y方向网格数
+
+
+def load_simulation_config(config_path: Optional[str] = None) -> Tuple[SimulationConfig, int]:
+    """
+    从YAML加载仿真配置，避免硬编码。
+
+    Returns:
+        (SimulationConfig实例, num_workers)
+    """
+
+    default_path = Path(__file__).resolve().parent / "configs" / "default_config.yaml"
+    path = Path(config_path) if config_path else default_path
+
+    if not path.exists():
+        return SimulationConfig(), 12
+
+    with path.open("r", encoding="utf-8") as f:
+        cfg_yaml = yaml.safe_load(f) or {}
+
+    def g(section: str, key: str, default: Any):
+        return (cfg_yaml.get(section, {}) or {}).get(key, default)
+
+    config = SimulationConfig(
+        wavelength=g("geometry", "wavelength", SimulationConfig.wavelength),
+        mmi_width=g("geometry", "mmi_width", SimulationConfig.mmi_width),
+        mmi_length=g("geometry", "mmi_length", SimulationConfig.mmi_length),
+        wg_width=g("geometry", "wg_width", SimulationConfig.wg_width),
+        wg_length=g("geometry", "wg_length", SimulationConfig.wg_length),
+        thickness=g("geometry", "thickness", SimulationConfig.thickness),
+        n_si=g("materials", "n_si", SimulationConfig.n_si),
+        n_sio2=g("materials", "n_sio2", SimulationConfig.n_sio2),
+        resolution=g("simulation", "resolution", SimulationConfig.resolution),
+        pml_thickness=g("simulation", "pml_thickness", SimulationConfig.pml_thickness),
+        run_time=g("simulation", "run_time", SimulationConfig.run_time),
+        n_cells_x=g("structure", "n_cells_x", SimulationConfig.n_cells_x),
+        n_cells_y=g("structure", "n_cells_y", SimulationConfig.n_cells_y),
+    )
+
+    num_workers = g("parallel", "num_workers", 12)
+    return config, num_workers
 
 
 class MMISimulator(Simulator):
@@ -45,6 +90,11 @@ class MMISimulator(Simulator):
     
     支持TE和TM偏振的仿真，计算各端口的传输效率。
     """
+    
+    @classmethod
+    def from_yaml(cls, config_path: Optional[str] = None) -> "MMISimulator":
+        config, num_workers = load_simulation_config(config_path)
+        return cls(config=config, num_workers=num_workers)
     
     def __init__(self, config: Optional[SimulationConfig] = None, num_workers: int = 12):
         """
@@ -576,8 +626,8 @@ class GeneticAlgorithmOptimizer:
     def __init__(
         self,
         simulator: MMISimulator,
-        n_cells_x: int = 30,
-        n_cells_y: int = 8,
+        n_cells_x: Optional[int] = None,
+        n_cells_y: Optional[int] = None,
         pop_size: int = 50,
         num_generations: int = 100,
         mutation_rate: float = 0.1,
@@ -591,8 +641,8 @@ class GeneticAlgorithmOptimizer:
         
         Args:
             simulator: MMISimulator实例
-            n_cells_x: MMI区域X方向网格数
-            n_cells_y: MMI区域Y方向网格数
+            n_cells_x: MMI区域X方向网格数（None时从simulator.config读取）
+            n_cells_y: MMI区域Y方向网格数（None时从simulator.config读取）
             pop_size: 种群大小
             num_generations: 演化代数
             mutation_rate: 变异概率
@@ -602,9 +652,9 @@ class GeneticAlgorithmOptimizer:
             verbose: 是否打印优化过程
         """
         self.simulator = simulator
-        self.n_cells_x = n_cells_x
-        self.n_cells_y = n_cells_y
-        self.n_genes = n_cells_x * n_cells_y  # 每个结构的基因数
+        self.n_cells_x = n_cells_x or simulator.config.n_cells_x
+        self.n_cells_y = n_cells_y or simulator.config.n_cells_y
+        self.n_genes = self.n_cells_x * self.n_cells_y  # 每个结构的基因数
         self.pop_size = pop_size
         self.num_generations = num_generations
         self.mutation_rate = mutation_rate
@@ -904,17 +954,17 @@ class GreedyOptimizer:
     def __init__(
         self,
         simulator: MMISimulator,
-        n_cells_x: int = 30,
-        n_cells_y: int = 8,
+        n_cells_x: Optional[int] = None,
+        n_cells_y: Optional[int] = None,
         max_steps: int = 200,
         patience: int = 20,
         seed: Optional[int] = None,
         verbose: bool = True
     ) -> None:
         self.simulator = simulator
-        self.n_cells_x = n_cells_x
-        self.n_cells_y = n_cells_y
-        self.n_genes = n_cells_x * n_cells_y
+        self.n_cells_x = n_cells_x or simulator.config.n_cells_x
+        self.n_cells_y = n_cells_y or simulator.config.n_cells_y
+        self.n_genes = self.n_cells_x * self.n_cells_y
         self.max_steps = max_steps
         self.patience = patience
         self.verbose = verbose

@@ -13,9 +13,14 @@ import gymnasium as gym
 from gymnasium import spaces
 
 
-from .core import Simulator, SimulationResult
-from .meep_simulator import MMISimulator, SimulationConfig
-from .utils import compute_reward
+try:
+    from .core import Simulator, SimulationResult
+    from .meep_simulator import MMISimulator, SimulationConfig, load_simulation_config
+    from .utils import compute_reward
+except ImportError:
+    from core import Simulator, SimulationResult
+    from meep_simulator import MMISimulator, SimulationConfig, load_simulation_config
+    from utils import compute_reward
 
 
 
@@ -39,20 +44,43 @@ class MeepMMIPBS(gym.Env):
     
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
     
+    @classmethod
+    def from_config_yaml(cls, config_path: str = None, **kwargs):
+        """
+        从YAML配置创建环境
+        
+        Args:
+            config_path: YAML配置路径
+            **kwargs: 覆盖的环境参数
+        
+        Returns:
+            MeepMMIPBS实例
+        """
+        config, num_workers = load_simulation_config(config_path)
+        simulator = MMISimulator(config=config, num_workers=num_workers)
+        
+        env_kwargs = {
+            'n_cells_x': config.n_cells_x,
+            'n_cells_y': config.n_cells_y,
+            'simulator': simulator,
+        }
+        env_kwargs.update(kwargs)
+        return cls(**env_kwargs)
+    
     def __init__(
         self,
         # 结构参数
-        n_cells_x: int = 30,
-        n_cells_y: int = 8,
+        n_cells_x: Optional[int] = None,
+        n_cells_y: Optional[int] = None,
         init_mode: str = "random",  # "random", "ones", "zeros", "half"
         
         # 仿真参数
         simulator: Optional[Simulator] = None,
-        wavelength: float = 1.55,
-        mmi_width: float = 4.0,
-        mmi_length: float = 15.0,
-        resolution: int = 10,  # 速度优先，降低分辨率
-        run_time: float = 50,  # 仿真时间，单位 1/f
+        wavelength: Optional[float] = None,
+        mmi_width: Optional[float] = None,
+        mmi_length: Optional[float] = None,
+        resolution: Optional[int] = None,
+        run_time: Optional[float] = None,
 
         
         # 并行参数
@@ -90,10 +118,13 @@ class MeepMMIPBS(gym.Env):
         """
         super().__init__()
         
-        # 保存参数
-        self.n_cells_x = n_cells_x
-        self.n_cells_y = n_cells_y
-        self.n_cells = n_cells_x * n_cells_y
+        # 从YAML加载默认配置
+        default_config, default_workers = load_simulation_config()
+        
+        # 保存参数（使用配置或传入值）
+        self.n_cells_x = n_cells_x or default_config.n_cells_x
+        self.n_cells_y = n_cells_y or default_config.n_cells_y
+        self.n_cells = self.n_cells_x * self.n_cells_y
         self.init_mode = init_mode
         self.reward_alpha = reward_alpha
         self.reward_beta = reward_beta
@@ -103,22 +134,18 @@ class MeepMMIPBS(gym.Env):
         
         if simulator is not None:
             self.simulator = simulator
-            # 尝试从simulator获取配置
-            if hasattr(simulator, 'config'):
-                # 简单同步参数
-                pass
         else:
-            # 创建默认仿真器
+            # 创建仿真器（用传入值覆盖默认配置）
             self.sim_config = SimulationConfig(
-                wavelength=wavelength,
-                mmi_width=mmi_width,
-                mmi_length=mmi_length,
-                resolution=resolution,
-                run_time=run_time,
-                n_cells_x=n_cells_x,
-                n_cells_y=n_cells_y,
+                wavelength=wavelength or default_config.wavelength,
+                mmi_width=mmi_width or default_config.mmi_width,
+                mmi_length=mmi_length or default_config.mmi_length,
+                resolution=resolution or default_config.resolution,
+                run_time=run_time or default_config.run_time,
+                n_cells_x=self.n_cells_x,
+                n_cells_y=self.n_cells_y,
             )
-            self.simulator = MMISimulator(self.sim_config, num_workers=num_workers)
+            self.simulator = MMISimulator(self.sim_config, num_workers=num_workers or default_workers)
         
         # 定义观察空间
         self.observation_space = spaces.Box(
