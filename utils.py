@@ -5,7 +5,7 @@
 """
 
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 import matplotlib.pyplot as plt
 
 
@@ -168,7 +168,7 @@ def visualize_structure(
 
 
 def visualize_results(
-    results: dict,
+    results: Any,
     structure: Optional[np.ndarray] = None,
     figsize: Tuple[int, int] = (12, 5),
     save_path: Optional[str] = None,
@@ -207,12 +207,27 @@ def visualize_results(
     
     # 绘制效率
     labels = ["TE→P1", "TE→P2", "TM→P1", "TM→P2"]
-    values = [
-        results.get("te_port1", 0),
-        results.get("te_port2", 0),
-        results.get("tm_port1", 0),
-        results.get("tm_port2", 0)
-    ]
+    
+    # 兼容 SimulationResult 对象和 dict
+    if hasattr(results, "te_port1"):
+        values = [
+            results.te_port1,
+            results.te_port2,
+            results.tm_port1,
+            results.tm_port2
+        ]
+        total_eff = results.total_efficiency
+        crosstalk = results.crosstalk
+    else:
+        values = [
+            results.get("te_port1", 0),
+            results.get("te_port2", 0),
+            results.get("tm_port1", 0),
+            results.get("tm_port2", 0)
+        ]
+        total_eff = results.get("total_efficiency", 0)
+        crosstalk = results.get("crosstalk", 0)
+    
     colors = ["green", "red", "red", "green"]  # 绿色=目标，红色=串扰
     
     bars = ax2.bar(labels, values, color=colors, alpha=0.7, edgecolor='black')
@@ -234,8 +249,8 @@ def visualize_results(
     # 添加图例
     ax2.text(
         0.95, 0.95,
-        f"Total Eff: {results.get('total_efficiency', 0):.3f}\n"
-        f"Crosstalk: {results.get('crosstalk', 0):.3f}",
+        f"Total Eff: {total_eff:.3f}\n"
+        f"Crosstalk: {crosstalk:.3f}",
         transform=ax2.transAxes,
         ha='right',
         va='top',

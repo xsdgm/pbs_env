@@ -12,8 +12,11 @@ from functools import partial
 import gymnasium as gym
 from gymnasium import spaces
 
+
+from .core import Simulator, SimulationResult
 from .meep_simulator import MMISimulator, SimulationConfig
-from .utils import compute_reward, normalize_structure
+from .utils import compute_reward
+
 
 
 class MeepMMIPBS(gym.Env):
@@ -44,11 +47,13 @@ class MeepMMIPBS(gym.Env):
         init_mode: str = "random",  # "random", "ones", "zeros", "half"
         
         # 仿真参数
+        simulator: Optional[Simulator] = None,
         wavelength: float = 1.55,
         mmi_width: float = 4.0,
         mmi_length: float = 15.0,
         resolution: int = 10,  # 速度优先，降低分辨率
-        run_time: float = 50,  # 速度优先，减少仿真时间
+        run_time: float = 50,  # 仿真时间，单位 1/f
+
         
         # 并行参数
         num_workers: int = 12,
@@ -69,6 +74,7 @@ class MeepMMIPBS(gym.Env):
             n_cells_x: MMI区域X方向网格数
             n_cells_y: MMI区域Y方向网格数
             init_mode: 初始化模式
+            simulator: 仿真器实例（可选），如果提供则忽略后续仿真配置参数
             wavelength: 工作波长 (μm)
             mmi_width: MMI宽度 (μm)
             mmi_length: MMI长度 (μm)
@@ -76,6 +82,7 @@ class MeepMMIPBS(gym.Env):
             run_time: 仿真时间
             num_workers: 并行工作进程数
             reward_alpha: TE效率权重
+
             reward_beta: TM效率权重
             reward_gamma: 串扰惩罚权重
             reward_type: 奖励类型
@@ -94,19 +101,24 @@ class MeepMMIPBS(gym.Env):
         self.reward_type = reward_type
         self.render_mode = render_mode
         
-        # 创建仿真配置
-        self.sim_config = SimulationConfig(
-            wavelength=wavelength,
-            mmi_width=mmi_width,
-            mmi_length=mmi_length,
-            resolution=resolution,
-            run_time=run_time,
-            n_cells_x=n_cells_x,
-            n_cells_y=n_cells_y,
-        )
-        
-        # 创建仿真器
-        self.simulator = MMISimulator(self.sim_config, num_workers=num_workers)
+        if simulator is not None:
+            self.simulator = simulator
+            # 尝试从simulator获取配置
+            if hasattr(simulator, 'config'):
+                # 简单同步参数
+                pass
+        else:
+            # 创建默认仿真器
+            self.sim_config = SimulationConfig(
+                wavelength=wavelength,
+                mmi_width=mmi_width,
+                mmi_length=mmi_length,
+                resolution=resolution,
+                run_time=run_time,
+                n_cells_x=n_cells_x,
+                n_cells_y=n_cells_y,
+            )
+            self.simulator = MMISimulator(self.sim_config, num_workers=num_workers)
         
         # 定义观察空间
         self.observation_space = spaces.Box(
@@ -246,11 +258,12 @@ class MeepMMIPBS(gym.Env):
         if self.current_results is None:
             return 0.0
         
+        # current_results 现在是 SimulationResult 对象
         return compute_reward(
-            te_port1=self.current_results.get("te_port1", 0),
-            tm_port2=self.current_results.get("tm_port2", 0),
-            te_port2=self.current_results.get("te_port2", 0),
-            tm_port1=self.current_results.get("tm_port1", 0),
+            te_port1=self.current_results.te_port1,
+            tm_port2=self.current_results.tm_port2,
+            te_port2=self.current_results.te_port2,
+            tm_port1=self.current_results.tm_port1,
             alpha=self.reward_alpha,
             beta=self.reward_beta,
             gamma=self.reward_gamma
@@ -265,12 +278,12 @@ class MeepMMIPBS(gym.Env):
         
         if self.current_results:
             info.update({
-                "te_port1": self.current_results.get("te_port1", 0),
-                "te_port2": self.current_results.get("te_port2", 0),
-                "tm_port1": self.current_results.get("tm_port1", 0),
-                "tm_port2": self.current_results.get("tm_port2", 0),
-                "crosstalk": self.current_results.get("crosstalk", 0),
-                "total_efficiency": self.current_results.get("total_efficiency", 0),
+                "te_port1": self.current_results.te_port1,
+                "te_port2": self.current_results.te_port2,
+                "tm_port1": self.current_results.tm_port1,
+                "tm_port2": self.current_results.tm_port2,
+                "crosstalk": self.current_results.crosstalk,
+                "total_efficiency": self.current_results.total_efficiency,
             })
             
             # 计算消光比 (dB)
@@ -316,9 +329,9 @@ class MeepMMIPBS(gym.Env):
         # 添加性能信息
         if self.current_results:
             info_text = (
-                f"TE→Port1: {self.current_results.get('te_port1', 0):.3f}\n"
-                f"TM→Port2: {self.current_results.get('tm_port2', 0):.3f}\n"
-                f"Crosstalk: {self.current_results.get('crosstalk', 0):.3f}"
+                f"TE→Port1: {self.current_results.te_port1:.3f}\n"
+                f"TM→Port2: {self.current_results.tm_port2:.3f}\n"
+                f"Crosstalk: {self.current_results.crosstalk:.3f}"
             )
             ax.text(
                 1.02, 0.5, info_text,
@@ -343,11 +356,11 @@ class MeepMMIPBS(gym.Env):
         print(f"Fill factor: {np.mean(self.structure):.3f}")
         
         if self.current_results:
-            print(f"TE → Port1: {self.current_results.get('te_port1', 0):.4f}")
-            print(f"TE → Port2: {self.current_results.get('te_port2', 0):.4f}")
-            print(f"TM → Port1: {self.current_results.get('tm_port1', 0):.4f}")
-            print(f"TM → Port2: {self.current_results.get('tm_port2', 0):.4f}")
-            print(f"Crosstalk: {self.current_results.get('crosstalk', 0):.4f}")
+            print(f"TE → Port1: {self.current_results.te_port1:.4f}")
+            print(f"TE → Port2: {self.current_results.te_port2:.4f}")
+            print(f"TM → Port1: {self.current_results.tm_port1:.4f}")
+            print(f"TM → Port2: {self.current_results.tm_port2:.4f}")
+            print(f"Crosstalk: {self.current_results.crosstalk:.4f}")
             print(f"Current Reward: {self.prev_reward:.4f}")
             print(f"Best Reward: {self.best_reward:.4f}")
     

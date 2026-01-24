@@ -6,12 +6,20 @@ MEEP MMI PBS 强化学习环境
 
 from gymnasium.envs.registration import register
 
+from .core import Simulator, SimulationResult
 from .mmi_pbs_env import MeepMMIPBS
 from .meep_simulator import MMISimulator
 from .utils import compute_reward, visualize_structure
 
 __version__ = "0.1.0"
-__all__ = ["MeepMMIPBS", "MMISimulator", "compute_reward", "visualize_structure"]
+__all__ = [
+    "MeepMMIPBS", 
+    "MMISimulator", 
+    "Simulator", 
+    "SimulationResult", 
+    "compute_reward", 
+    "visualize_structure"
+]
 
 # 注册gymnasium环境
 register(
