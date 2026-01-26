@@ -15,9 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from tqdm import tqdm
 
-from meep_simulator import MMISimulator, load_simulation_config, GeneticAlgorithmOptimizer
+import meep as mp
+from meep_simulator import MMISimulator, load_simulation_config, GeneticAlgorithmOptimizer, SdfGeneticAlgorithmOptimizer
 from utils import compute_reward
 
 
@@ -32,7 +34,10 @@ def run_genetic_algorithm_optimization(
     pop_size: int = 50,
     num_generations: int = 100,
     mutation_rate: float = 0.1,
-    init_mode: str = "random"
+    init_mode: str = "random",
+    use_parallel: bool = True,
+    num_workers: Optional[int] = None,
+    log_path: str = "./logs/ga_run.log"
 ) -> Dict[str, Any]:
     """
     运行遗传算法优化
@@ -43,6 +48,9 @@ def run_genetic_algorithm_optimization(
         num_generations: 演化代数
         mutation_rate: 变异率
         init_mode: 初始化模式
+        use_parallel: 是否使用多核并行评估
+        num_workers: 并行进程数（None时自动使用simulator或CPU核心数）
+        log_path: 日志文件保存路径
     
     Returns:
         优化结果字典
@@ -59,12 +67,46 @@ def run_genetic_algorithm_optimization(
         crossover_rate=0.8,
         elite_ratio=0.1,
         seed=42,
-        verbose=True
+        verbose=True,
+        use_parallel=use_parallel,
+        num_workers=num_workers or simulator.num_workers,
+        log_path=log_path
     )
     
     ga_result = ga_optimizer.optimize(init_mode=init_mode)
     
     return ga_result
+
+
+
+def run_sdf_ga_optimization(
+    simulator: MMISimulator,
+    pop_size: int = 50,
+    num_generations: int = 100,
+    mutation_strength: float = 0.1,
+    n_circles: int = 10,
+    log_path: str = "./logs/sdf_ga_run.log"
+) -> Dict[str, Any]:
+    """
+    运行基于SDF的遗传算法优化
+    """
+    print("\n" + "=" * 70)
+    print("SDF + 遗传算法 - 设计优化")
+    print("=" * 70)
+    
+    optimizer = SdfGeneticAlgorithmOptimizer(
+        simulator=simulator,
+        pop_size=pop_size,
+        num_generations=num_generations,
+        mutation_strength=mutation_strength,
+        n_circles=n_circles,
+        log_path=log_path,
+        seed=42,
+        verbose=True
+    )
+    
+    result = optimizer.optimize()
+    return result
 
 
 def evaluate_structure(simulator: MMISimulator, structure: np.ndarray) -> Dict[str, float]:
@@ -176,7 +218,10 @@ def compare_random_vs_optimized(simulator: MMISimulator, optimized_structure: np
     print("=" * 70)
     
     # 随机结构
-    random_structure = np.random.randint(0, 2, size=(30, 8))
+    random_structure = np.random.randint(
+        0, 2, 
+        size=(simulator.config.n_cells_x, simulator.config.n_cells_y)
+    )
     random_metrics = evaluate_structure(simulator, random_structure)
     
     # 优化结构
@@ -269,38 +314,60 @@ def main():
     print("初始化MEEP仿真器...")
     simulator = setup_simulator()
     
-    # 2. 运行遗传算法
-    print("\n运行遗传算法优化...")
-    ga_result = run_genetic_algorithm_optimization(
+    # 定义 n_circles (保持一致)
+    N_CIRCLES = 10  # 对于 4x3um 紧凑设计，10个圆足够
+    
+    # 2. 运行SDF遗传算法
+    print("\n运行SDF + GA优化...")
+    ga_result = run_sdf_ga_optimization(
         simulator=simulator,
-        pop_size=200,
-        num_generations=500,
-        mutation_rate=0.1,
-        init_mode="random"
+        pop_size=30,            # 降低到合理大小 (30 * 50 = 1500次仿真 ≈ 20分钟)
+        num_generations=50,     # 降低代数以快速验证
+        mutation_strength=0.15,
+        n_circles=N_CIRCLES,    # 使用统一的变量
+        log_path="./logs/sdf_ga_run.log"
     )
     
-    # 3. 对比随机结构与优化结构
-    compare_random_vs_optimized(simulator, ga_result["best_individual"])
-    
-    # 4. 绘制结果
-    print("\n生成可视化...")
-    plot_optimization_history(ga_result, save_path="./ga_optimization_history.png")
-    plot_structure(ga_result["best_individual"], 
-                  title="Genetic Algorithm Optimized Structure",
-                  save_path="./ga_optimized_structure.png")
-                  
-    # 4.b 保存最佳结构和仿真结果组合图 (使用集成方法)
-    print(f"正在保存最佳结果可视化...")
-    simulator.visualize_results(
-        results=ga_result["best_result"],
-        structure=ga_result["best_individual"],
-        save_path="./ga_best_result.png",
-        show=False
-    )
-    print(f"结果图已保存到: ./ga_best_result.png")
-    
-    # 5. 保存结果
-    save_results_to_file(ga_result, save_dir="./results")
+    # 3. 结果处理...
+    if ga_result and ga_result.get("best_individual") is not None:
+        # 3. 绘制结果
+        print("\n生成可视化...")
+        plot_optimization_history(ga_result, save_path="./sdf_ga_optimization_history.png")
+        
+        # 4.b 保存最佳结构和仿真结果组合图 (使用集成方法)
+        print(f"正在保存最佳结果可视化...")
+        
+        # 为了可视化，从SDF参数重新采样结构
+        final_params = ga_result["best_individual"]
+        best_sdf = SdfGeneticAlgorithmOptimizer.create_sdf_from_params(
+            final_params, 
+            n_circles=N_CIRCLES,  # 使用与优化器一致的参数
+            domain_size=(simulator.config.mmi_length, simulator.config.mmi_width)
+        )
+        
+        # 创建一个离散的结构图用于可视化
+        xs = np.linspace(-simulator.config.mmi_length/2, simulator.config.mmi_length/2, simulator.config.n_cells_x)
+        ys = np.linspace(-simulator.config.mmi_width/2, simulator.config.mmi_width/2, simulator.config.n_cells_y)
+        grid_x, grid_y = np.meshgrid(xs, ys, indexing='ij')
+        
+        sampled_structure = np.zeros((simulator.config.n_cells_x, simulator.config.n_cells_y))
+        for i in range(simulator.config.n_cells_x):
+            for j in range(simulator.config.n_cells_y):
+                p = mp.Vector3(grid_x[i, j], grid_y[i, j])
+                if best_sdf(p) <= 0:
+                    sampled_structure[i, j] = 1
+        
+        from utils import visualize_results
+        visualize_results(
+            results=ga_result["best_result"],
+            structure=sampled_structure,
+            save_path="./sdf_ga_best_result.png",
+            show=False
+        )
+        print(f"结果图已保存到: ./sdf_ga_best_result.png")
+        
+        # 5. 保存结果
+        save_results_to_file(ga_result, save_dir="./sdf_ga_results")
     
     print("\n" + "=" * 70)
     print("优化完成！")

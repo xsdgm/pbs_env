@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Dict, Any, Optional
+from pathlib import Path
 from utils import visualize_results
 
 from meep_simulator import MMISimulator, load_simulation_config, SimulationResult
@@ -36,6 +37,7 @@ class AdjointOptimizer:
         num_iterations: int = 100,
         damping: float = 0.5,
         early_stop_patience: int = 20,
+        log_path: Optional[str] = None,
         seed: Optional[int] = None,
         verbose: bool = True
     ):
@@ -48,6 +50,7 @@ class AdjointOptimizer:
             num_iterations: 最大迭代次数
             damping: 阻尼系数（0-1，防止振荡）
             early_stop_patience: 无改进的耐心步数
+            log_path: 日志文件路径（可选）
             seed: 随机种子
             verbose: 是否打印优化过程
         """
@@ -57,16 +60,23 @@ class AdjointOptimizer:
         self.damping = damping
         self.early_stop_patience = early_stop_patience
         self.verbose = verbose
+        self.log_file = Path(log_path).expanduser() if log_path else None
+        if self.log_file:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            # 清空旧日志文件，开始新的优化记录
+            with self.log_file.open("w", encoding="utf-8") as f:
+                f.write("")  # 创建空文件
         
         if seed is not None:
             np.random.seed(seed)
         
-        # 优化目标权重：与GA一致
+        # 优化目标权重：增加 TE 权重以平衡优化
+        # 因为 TM 梯度通常更大，需要给 TE 更高的权重
         self.target_weights = {
-            "te_port1": 1.0,
-            "tm_port2": 1.0,
-            "te_port2": -0.5,
-            "tm_port1": -0.5,
+            "te_port1": 4.0,   # 大幅增加 TE 权重
+            "tm_port2": 2.0,
+            "te_port2": -3.0,  # 增加串扰惩罚
+            "tm_port1": -1.5,
         }
         
         # 优化历史
@@ -78,6 +88,14 @@ class AdjointOptimizer:
             "crosstalk": [],
             "gradient_norm": [],
         }
+    
+    def _log(self, msg: str):
+        """同时写入控制台和文件的日志函数"""
+        if self.verbose:
+            print(msg)
+        if self.log_file:
+            with self.log_file.open("a", encoding="utf-8") as f:
+                f.write(msg + "\n")
     
     def _fitness(self, result: SimulationResult) -> float:
         """计算适应度"""
@@ -128,17 +146,26 @@ class AdjointOptimizer:
                     (self.simulator.config.n_cells_x, self.simulator.config.n_cells_y),
                     dtype=np.float32
                 )
+            elif init_mode == "gray_noise":
+                # 灰度背景 (0.5) + 微弱随机噪声 (±0.05)
+                base = 0.5 * np.ones(
+                    (self.simulator.config.n_cells_x, self.simulator.config.n_cells_y),
+                    dtype=np.float32
+                )
+                noise = np.random.uniform(-0.05, 0.05, base.shape).astype(np.float32)
+                structure = np.clip(base + noise, 0, 1)
             else:
                 raise ValueError(f"Unknown initialization mode: {init_mode}")
         
-        if self.verbose:
-            print("启动伴随法优化")
-            print(f"学习率: {self.learning_rate}")
-            print(f"最大迭代次数: {self.num_iterations}")
-            print(f"阻尼系数: {self.damping}")
-            print(f"初始化模式: {init_mode}")
-            print(f"结构形状: {structure.shape}")
-            print("-" * 60)
+        self._log("启动伴随法优化")
+        self._log(f"学习率: {self.learning_rate}")
+        self._log(f"最大迭代次数: {self.num_iterations}")
+        self._log(f"阻尼系数: {self.damping}")
+        self._log(f"初始化模式: {init_mode}")
+        self._log(f"结构形状: {structure.shape}")
+        if self.log_file:
+            self._log(f"日志文件: {self.log_file}")
+        self._log("-" * 60)
         
         best_structure = structure.copy()
         best_fitness = -np.inf
@@ -173,6 +200,11 @@ class AdjointOptimizer:
             gradient_norm = np.linalg.norm(gradients)
             self.history["gradient_norm"].append(gradient_norm)
             
+            # 梯度归一化：控制最大更新步长
+            max_grad = np.max(np.abs(gradients))
+            if max_grad > 1e-8:
+                gradients = gradients / max_grad
+            
             # 4. 梯度上升更新
             update = self.learning_rate * gradients
             # 应用阻尼
@@ -181,17 +213,16 @@ class AdjointOptimizer:
             structure = np.clip(structure, 0, 1)
             
             # 5. 打印进度
-            if self.verbose and (iteration % max(1, self.num_iterations // 10) == 0 or iteration == self.num_iterations - 1):
-                print(
-                    f"迭代 {iteration:3d} | 适应度: {fitness:7.4f} | "
-                    f"TE→P1: {result.te_port1:6.4f} | TM→P2: {result.tm_port2:6.4f} | "
-                    f"梯度范数: {gradient_norm:7.4f} | 无改进计数: {no_improve_count}"
-                )
+            # if iteration % max(1, self.num_iterations // 10) == 0 or iteration == self.num_iterations - 1:
+            self._log(
+                f"迭代 {iteration:3d} | 适应度: {fitness:7.4f} | "
+                f"TE→P1: {result.te_port1:6.4f} | TM→P2: {result.tm_port2:6.4f} | "
+                f"梯度范数: {gradient_norm:7.4f} | 无改进计数: {no_improve_count}"
+            )
             
             # 6. 早停
             if no_improve_count >= self.early_stop_patience:
-                if self.verbose:
-                    print(f"无改进达到耐心阈值 ({self.early_stop_patience})，提前停止")
+                self._log(f"无改进达到耐心阈值 ({self.early_stop_patience})，提前停止")
                 break
         
         # 最终二值化
@@ -199,16 +230,15 @@ class AdjointOptimizer:
         best_result = self.simulator.simulate(final_structure, polarization="both")
         best_fitness_final = self._fitness(best_result)
         
-        if self.verbose:
-            print("-" * 60)
-            print("优化完成！")
-            print(f"最终适应度: {best_fitness_final:.4f}")
-            print(f"TE→Port1效率: {best_result.te_port1:.4f}")
-            print(f"TM→Port2效率: {best_result.tm_port2:.4f}")
-            print(f"TE→Port2串扰: {best_result.te_port2:.4f}")
-            print(f"TM→Port1串扰: {best_result.tm_port1:.4f}")
-            print(f"总效率: {best_result.total_efficiency:.4f}")
-            print(f"总串扰: {best_result.crosstalk:.4f}")
+        self._log("-" * 60)
+        self._log("优化完成！")
+        self._log(f"最终适应度: {best_fitness_final:.4f}")
+        self._log(f"TE→Port1效率: {best_result.te_port1:.4f}")
+        self._log(f"TM→Port2效率: {best_result.tm_port2:.4f}")
+        self._log(f"TE→Port2串扰: {best_result.te_port2:.4f}")
+        self._log(f"TM→Port1串扰: {best_result.tm_port1:.4f}")
+        self._log(f"总效率: {best_result.total_efficiency:.4f}")
+        self._log(f"总串扰: {best_result.crosstalk:.4f}")
         
         return {
             "best_structure": final_structure,
@@ -234,7 +264,8 @@ def run_adjoint_optimization(
     simulator: MMISimulator,
     learning_rate: float = 0.01,
     num_iterations: int = 100,
-    init_mode: str = "random"
+    init_mode: str = "random",
+    log_path: str = "./logs/adjoint_run.txt"
 ) -> Dict[str, Any]:
     """
     运行伴随法优化
@@ -244,6 +275,7 @@ def run_adjoint_optimization(
         learning_rate: 学习率
         num_iterations: 迭代次数
         init_mode: 初始化模式
+        log_path: 日志文件保存路径
     
     Returns:
         优化结果字典
@@ -257,12 +289,13 @@ def run_adjoint_optimization(
         learning_rate=learning_rate,
         num_iterations=num_iterations,
         damping=0.5,
-        early_stop_patience=15,
+        early_stop_patience=50,  # 增加耐心值
+        log_path=log_path,
         seed=42,
         verbose=True
     )
     
-    return optimizer.optimize(init_mode="half")
+    return optimizer.optimize(init_mode=init_mode)
 
 
 def evaluate_structure(simulator: MMISimulator, structure: np.ndarray) -> Dict[str, float]:
@@ -352,23 +385,53 @@ def plot_optimization_history(adjoint_result: Dict[str, Any], save_path: str = N
     plt.show()
 
 
-def plot_structure(structure: np.ndarray, title: str = "Optimized Structure", save_path: str = None):
+def plot_structure(
+    structure: np.ndarray, 
+    title: str = "Optimized Structure", 
+    save_path: str = None,
+    config: Optional[Any] = None
+):
     """
-    绘制结构可视化
+    绘制结构可视化 (支持物理尺寸坐标)
     
     Args:
         structure: 结构数组
         title: 图标题
         save_path: 保存路径（可选）
+        config: 仿真配置对象（用于获取物理尺寸）
     """
     fig, ax = plt.subplots(figsize=(10, 6))
     
     # 转置以匹配坐标系
     structure_display = structure.T[::-1]  # Y轴反向
     
-    im = ax.imshow(structure_display, cmap='gray', aspect='auto', origin='lower')
-    ax.set_xlabel("X (cells)")
-    ax.set_ylabel("Y (cells)")
+    # 确定坐标范围
+    if config:
+        # 如果有配置，使用微米单位
+        extent = [
+            -config.mmi_length / 2, 
+            config.mmi_length / 2, 
+            -config.mmi_width / 2, 
+            config.mmi_width / 2
+        ]
+        xlabel = "X (μm)"
+        ylabel = "Y (μm)"
+    else:
+        # 否则使用网格索引
+        extent = [0, structure.shape[0], 0, structure.shape[1]]
+        xlabel = "X (cells)"
+        ylabel = "Y (cells)"
+    
+    im = ax.imshow(
+        structure_display, 
+        cmap='gray', 
+        aspect='equal',  # 保持物理比例
+        origin='lower',
+        extent=extent
+    )
+    
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     ax.set_title(title)
     plt.colorbar(im, ax=ax, label="Material (0=SiO2, 1=Si)")
     
@@ -416,47 +479,32 @@ def compare_random_vs_optimized(simulator: MMISimulator, optimized_structure: np
     print(f"{'TM消光比':<25} {random_metrics['tm_extinction_ratio']:>6.2f} dB       {opt_metrics['tm_extinction_ratio']:>6.2f} dB")
 
 
-def main():
-    """主函数"""
-    # 1. 初始化仿真器
-    print("初始化MEEP仿真器...")
-    simulator = setup_simulator()
+def save_results_to_file(adjoint_result: Dict[str, Any], save_dir: str = "./adjoint_results"):
+    """
+    保存伴随法优化结果到文件
     
-    # 2. 运行伴随法优化
-    print("\n运行伴随法优化...")
-    adjoint_result = run_adjoint_optimization(
-        simulator=simulator,
-        learning_rate=0.01,
-        num_iterations=100,
-        init_mode="random"
-    )
+    Args:
+        adjoint_result: 优化结果
+        save_dir: 保存目录
+    """
+    os.makedirs(save_dir, exist_ok=True)
     
-    # 3. 对比随机结构与优化结构
-    compare_random_vs_optimized(simulator, adjoint_result["best_structure"])
-    
-    # 4. 绘制结果
-    print("\n生成可视化...")
-    plot_optimization_history(adjoint_result, save_path="./adjoint_optimization_history.png")
-    plot_structure(
-        adjoint_result["best_structure"],
-        title="Adjoint Optimized PBS Structure",
-        save_path="./adjoint_optimized_structure.png"
-    )
-
-    # 4.b 保存最佳结构和仿真结果组合图
-    print(f"正在保存最佳结果可视化...")
-    visualize_results(
-        results=adjoint_result["best_result"],
-        structure=adjoint_result["best_structure"],
-        save_path="./adjoint_best_result.png",
-        show=False
-    )
-    print(f"结果图已保存到: ./adjoint_best_result.png")
-    
-    # 5. 保存结果
-    os.makedirs("./results", exist_ok=True)
+    best_structure = adjoint_result["best_structure"]
     best_result = adjoint_result["best_result"]
-    with open("./results/adjoint_performance.txt", "w") as f:
+    history = adjoint_result["history"]
+    
+    # 保存最优结构
+    np.save(f"{save_dir}/best_structure_adjoint.npy", best_structure)
+    
+    # 保存连续结构（二值化前）
+    if "continuous_structure" in adjoint_result:
+        np.save(f"{save_dir}/continuous_structure_adjoint.npy", adjoint_result["continuous_structure"])
+    
+    # 保存优化历史
+    np.save(f"{save_dir}/adjoint_history.npy", history)
+    
+    # 保存性能指标到文本文件
+    with open(f"{save_dir}/adjoint_performance.txt", "w") as f:
         f.write("伴随法优化结果\n")
         f.write("=" * 50 + "\n\n")
         f.write(f"最优适应度: {adjoint_result['best_fitness']:.4f}\n")
@@ -467,8 +515,64 @@ def main():
         f.write(f"总效率: {best_result.total_efficiency:.4f}\n")
         f.write(f"总串扰: {best_result.crosstalk:.4f}\n")
         f.write(f"\n迭代次数: {adjoint_result['num_iterations']}\n")
+        
+        # 计算消光比
+        te_er = 10 * np.log10((best_result.te_port1 + 1e-10) / (best_result.te_port2 + 1e-10))
+        tm_er = 10 * np.log10((best_result.tm_port2 + 1e-10) / (best_result.tm_port1 + 1e-10))
+        f.write(f"TE消光比: {te_er:.2f} dB\n")
+        f.write(f"TM消光比: {tm_er:.2f} dB\n")
     
-    print("\n结果已保存到 ./results/adjoint_performance.txt")
+    print(f"\n结果已保存到 {save_dir}:")
+    print(f"  - 最优结构: {save_dir}/best_structure_adjoint.npy")
+    print(f"  - 优化历史: {save_dir}/adjoint_history.npy")
+    print(f"  - 性能指标: {save_dir}/adjoint_performance.txt")
+
+
+def main():
+    """主函数"""
+    # 定义保存目录
+    SAVE_DIR = "./adjoint_results"
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    
+    # 1. 初始化仿真器
+    print("初始化MEEP仿真器...")
+    simulator = setup_simulator()
+    
+    # 2. 运行伴随法优化
+    print("\n运行伴随法优化...")
+    adjoint_result = run_adjoint_optimization(
+        simulator=simulator,
+        learning_rate=0.2,       # 归一化后，这是最大像素变化量
+        num_iterations=150,      # 增加迭代次数
+        init_mode="gray_noise",  # 使用灰度+噪声初始化
+        log_path=f"{SAVE_DIR}/adjoint_run.txt"
+    )
+    
+    # 3. 对比随机结构与优化结构
+    compare_random_vs_optimized(simulator, adjoint_result["best_structure"])
+    
+    # 4. 绘制结果
+    print("\n生成可视化...")
+    plot_optimization_history(adjoint_result, save_path=f"{SAVE_DIR}/adjoint_optimization_history.png")
+    plot_structure(
+        adjoint_result["best_structure"],
+        title="Adjoint Optimized PBS Structure",
+        save_path=f"{SAVE_DIR}/adjoint_optimized_structure.png",
+        config=simulator.config  # 传入配置以显示物理坐标
+    )
+
+    # 4.b 保存最佳结构和仿真结果组合图
+    print(f"正在保存最佳结果可视化...")
+    visualize_results(
+        results=adjoint_result["best_result"],
+        structure=adjoint_result["best_structure"],
+        save_path=f"{SAVE_DIR}/adjoint_best_result.png",
+        show=False
+    )
+    print(f"结果图已保存到: {SAVE_DIR}/adjoint_best_result.png")
+    
+    # 5. 保存结果到统一目录
+    save_results_to_file(adjoint_result, save_dir=SAVE_DIR)
     
     print("\n" + "=" * 70)
     print("伴随法优化完成！")

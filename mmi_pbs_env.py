@@ -72,7 +72,7 @@ class MeepMMIPBS(gym.Env):
         # 结构参数
         n_cells_x: Optional[int] = None,
         n_cells_y: Optional[int] = None,
-        init_mode: str = "random",  # "random", "ones", "zeros", "half"
+        init_mode: str = "random",  # "random", "ones", "zeros", "half", "test_uniform", "test_center_bar", "test_y_split"
         
         # 仿真参数
         simulator: Optional[Simulator] = None,
@@ -273,6 +273,12 @@ class MeepMMIPBS(gym.Env):
             struct = np.zeros((self.n_cells_x, self.n_cells_y), dtype=np.float32)
             struct[:, :self.n_cells_y // 2] = 1.0
             return struct
+        elif self.init_mode == "test_uniform":
+            return create_test_structure(self.n_cells_x, self.n_cells_y, mode="uniform")
+        elif self.init_mode == "test_center_bar":
+            return create_test_structure(self.n_cells_x, self.n_cells_y, mode="center_bar")
+        elif self.init_mode == "test_y_split":
+            return create_test_structure(self.n_cells_x, self.n_cells_y, mode="y_split")
         else:
             raise ValueError(f"Unknown init_mode: {self.init_mode}")
     
@@ -406,3 +412,55 @@ class MeepMMIPBS(gym.Env):
     def load_structure(self, path: str):
         """加载结构"""
         self.structure = np.load(path)
+
+
+def create_test_structure(
+    n_cells_x: int,
+    n_cells_y: int,
+    mode: str = "y_split"
+) -> np.ndarray:
+    """
+    生成用于验证仿真的测试结构。
+
+    模式说明:
+    - uniform: 全1（硅填充）
+    - center_bar: 中心直波导条带
+    - y_split: 中心输入并逐渐分叉到上下两端口
+    """
+    struct = np.zeros((n_cells_x, n_cells_y), dtype=np.float32)
+
+    if mode == "uniform":
+        struct[:] = 1.0
+        return struct
+
+    if mode == "center_bar":
+        bar_half = max(1, n_cells_y // 10)
+        center = n_cells_y // 2
+        struct[:, center - bar_half:center + bar_half] = 1.0
+        return struct
+
+    if mode == "y_split":
+        bar_half = max(1, n_cells_y // 12)
+        center = n_cells_y // 2
+        top_center = (3 * n_cells_y) // 4
+        bot_center = n_cells_y // 4
+        x_split = n_cells_x // 3
+        x_merge = (2 * n_cells_x) // 3
+
+        # 输入段：中心直波导
+        struct[:x_split, center - bar_half:center + bar_half] = 1.0
+
+        # 分叉段：从中心平滑过渡到上下两端口
+        for i, x in enumerate(range(x_split, x_merge)):
+            t = i / max(1, (x_merge - x_split - 1))
+            top_c = int(round(center + t * (top_center - center)))
+            bot_c = int(round(center + t * (bot_center - center)))
+            struct[x, top_c - bar_half:top_c + bar_half] = 1.0
+            struct[x, bot_c - bar_half:bot_c + bar_half] = 1.0
+
+        # 输出段：上下双波导
+        struct[x_merge:, top_center - bar_half:top_center + bar_half] = 1.0
+        struct[x_merge:, bot_center - bar_half:bot_center + bar_half] = 1.0
+        return struct
+
+    raise ValueError(f"Unknown test structure mode: {mode}")
