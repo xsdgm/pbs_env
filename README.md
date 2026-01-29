@@ -41,6 +41,18 @@ sys.path.insert(0, '/home/xsdgm')
 import pbs_env
 ```
 
+## 环境检查
+
+安装完成后，建议运行以下脚本验证环境配置：
+
+```bash
+# 检查 Python 环境及依赖
+python env_checks/verify_env.py
+
+# 验证物理仿真计算 (有效折射率法)
+python env_checks/verify_physics.py
+```
+
 ## 快速开始
 
 ### 基本使用
@@ -148,19 +160,47 @@ env = pbs_env.make(
 env = pbs_env.make("MeepMMIPBS-Fast-v0")
 ```
 
+## 基准算法 (Baselines)
+
+本项目提供了两种传统的逆向设计方法作为对比基准：
+
+### 1. 伴随法 (Adjoint Method)
+
+利用梯度信息进行高效的局部优化。
+
+```bash
+python baseline/adjoint_design.py
+```
+
+### 2. 遗传算法 (Genetic Algorithm)
+
+全局优化算法，适合探索更大的搜索空间。
+
+```bash
+python baseline/genetic_algorithm_design.py
+```
+
 ## 文件结构
 
 ```
 pbs_env/
-├── __init__.py          # 包初始化，环境注册
-├── mmi_pbs_env.py       # 主环境类
-├── meep_simulator.py    # MEEP仿真封装
-├── utils.py             # 工具函数
+├── __init__.py          # 包初始化
+├── core.py              # 核心逻辑
+├── mmi_pbs_env.py       # Gym 环境实现
+├── meep_simulator.py    # MEEP 仿真接口
+├── utils.py             # 通用工具
 ├── configs/
 │   └── default_config.yaml
-├── examples/
-│   ├── test_env.py      # 环境测试
-│   └── train_ppo.py     # PPO训练示例
+├── baseline/            # 基准算法
+│   ├── adjoint_design.py
+│   └── genetic_algorithm_design.py
+├── env_checks/          # 环境验证脚本
+│   ├── verify_env.py
+│   └── verify_physics.py
+├── examples/            # 使用示例
+│   ├── test_env.py
+│   └── train_ppo.py
+├── results/             # 仿真结果
 └── README.md
 ```
 

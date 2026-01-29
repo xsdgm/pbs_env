@@ -2,8 +2,8 @@
 
 # 结构参数
 structure:
-  n_cells_x: 60  # 6.0um / 0.1um = 60
-  n_cells_y: 24  # 2.4um / 0.1um = 24 (偶数网格确保 y=0 和 y=width/4=0.6 对齐到网格边界)
+  n_cells_x: 120  # 6.0um / 0.05um = 120
+  n_cells_y: 48   # 2.4um / 0.05um = 48 (偶数网格确保 y=0 和 y=width/4=0.6 对齐到网格边界)
   init_mode: "random"
 
 # 几何参数 (单位: μm)

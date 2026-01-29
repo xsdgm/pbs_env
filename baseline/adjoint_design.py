@@ -39,7 +39,9 @@ class AdjointOptimizer:
         early_stop_patience: int = 20,
         log_path: Optional[str] = None,
         seed: Optional[int] = None,
-        verbose: bool = True
+        verbose: bool = True,
+        crosstalk_warmup_iters: int = 30,
+        crosstalk_scale: float = 0.3
     ):
         """
         初始化伴随法优化器
@@ -70,14 +72,17 @@ class AdjointOptimizer:
         if seed is not None:
             np.random.seed(seed)
         
-        # 优化目标权重：增加 TE 权重以平衡优化
-        # 因为 TM 梯度通常更大，需要给 TE 更高的权重
+        # 优化目标权重：初始阶段仅关注拉升效率，无串扰惩罚 (两阶段优化)
+        # 阶段1：TE/TM > 0.8 前，串扰权重为 0
+        # 阶段2：满足条件后，串扰权重设为 -0.5
         self.target_weights = {
-            "te_port1": 4.0,   # 大幅增加 TE 权重
-            "tm_port2": 2.0,
-            "te_port2": -3.0,  # 增加串扰惩罚
-            "tm_port1": -1.5,
+            "te_port1": 1.0,
+            "tm_port2": 1.0,
+            "te_port2": 0.0,
+            "tm_port1": 0.0,
         }
+        self.crosstalk_warmup_iters = max(0, int(crosstalk_warmup_iters))
+        self.crosstalk_scale = float(crosstalk_scale)
         
         # 优化历史
         self.history = {
@@ -87,6 +92,8 @@ class AdjointOptimizer:
             "total_efficiency": [],
             "crosstalk": [],
             "gradient_norm": [],
+            "er_te_db": [],
+            "er_tm_db": [],
         }
     
     def _log(self, msg: str):
@@ -97,14 +104,87 @@ class AdjointOptimizer:
             with self.log_file.open("a", encoding="utf-8") as f:
                 f.write(msg + "\n")
     
-    def _fitness(self, result: SimulationResult) -> float:
+    def _calculate_softmin(self, x: float, y: float, k: float = 15.0) -> tuple[float, float, float]:
+        """
+        计算 Softmin FOM 以及对应的梯度权重。
+        Softmin = -1/k * log(e^(-k*x) + e^(-k*y)) 逼近 min(x, y)
+        Returns: (fom, w_x, w_y)
+        """
+        # 数值稳定性：避免溢出
+        max_val = max(x, y)
+        exp_x = np.exp(-k * (x - max_val))
+        exp_y = np.exp(-k * (y - max_val))
+        denom = exp_x + exp_y
+        
+        fom = max_val - (1.0 / k) * np.log(denom)
+        
+        # Softmax 权重 (导数): 较小值获得更大权重
+        w_x = exp_x / denom
+        w_y = exp_y / denom
+        
+        return fom, w_x, w_y
+    
+    def _calculate_extinction_ratio_fom(self, result, k: float = 10.0) -> tuple[float, dict]:
+        """
+        计算基于消光比的FOM，直接优化PBS的核心指标。
+        
+        ER_TE = TE→Port1 / TE→Port2 (期望越高越好)
+        ER_TM = TM→Port2 / TM→Port1 (期望越高越好)
+        
+        为了数值稳定，使用对数形式:
+        log_ER_TE = log(TE→P1) - log(TE→P2)
+        log_ER_TM = log(TM→P2) - log(TM→P1)
+        
+        FOM = Softmin(log_ER_TE, log_ER_TM) 确保两个偏振都达到高消光比
+        
+        Returns: (fom, gradient_weights_dict)
+        """
+        eps = 1e-8  # 防止log(0)
+        
+        # 计算对数消光比 (单位: nepers，可转换为dB: *10/ln(10))
+        log_er_te = np.log(result.te_port1 + eps) - np.log(result.te_port2 + eps)
+        log_er_tm = np.log(result.tm_port2 + eps) - np.log(result.tm_port1 + eps)
+        
+        # Softmin 作用于对数消光比
+        fom, w_te, w_tm = self._calculate_softmin(log_er_te, log_er_tm, k=k)
+        
+        # 计算各端口的梯度权重
+        # d(log_ER_TE)/d(te_port1) = 1/te_port1,  d(log_ER_TE)/d(te_port2) = -1/te_port2
+        # d(log_ER_TM)/d(tm_port2) = 1/tm_port2,  d(log_ER_TM)/d(tm_port1) = -1/tm_port1
+        gradient_weights = {
+            "te_port1": w_te / (result.te_port1 + eps),
+            "te_port2": -w_te / (result.te_port2 + eps),
+            "tm_port2": w_tm / (result.tm_port2 + eps),
+            "tm_port1": -w_tm / (result.tm_port1 + eps),
+        }
+        
+        return fom, gradient_weights
+    
+    def _fitness(self, result: SimulationResult, weights: Optional[Dict[str, float]] = None) -> float:
         """计算适应度"""
-        return (
-            self.target_weights["te_port1"] * result.te_port1
-            + self.target_weights["tm_port2"] * result.tm_port2
-            + self.target_weights["te_port2"] * result.te_port2
-            + self.target_weights["tm_port1"] * result.tm_port1
-        )
+        weights = weights or self.target_weights
+        # === 改进的 FOM 定义 ===
+        # 目标：最大化偏振分离效果
+        # FOM = (TE→P1 - TE→P2) + (TM→P2 - TM→P1)
+        #     = 目标端口效率 - 串扰效率
+        # 
+        # 这样的定义同时实现：
+        # 1. 最大化目标端口的电场强度 |E|²
+        # 2. 最小化串扰（泄漏到错误端口的能量）
+        # 3. 鼓励偶振分离
+        te_separation = result.te_port1 - result.te_port2  # TE 应去 P1
+        tm_separation = result.tm_port2 - result.tm_port1  # TM 应去 P2
+        return te_separation + tm_separation
+
+    def _get_adaptive_crosstalk_weight(self, result, base_weight: float = 0.3) -> float:
+        """
+        自适应串扰权重：根据当前效率动态调整。
+        效率越高，串扰惩罚越重，促进精细调优。
+        """
+        min_eff = min(result.te_port1, result.tm_port2)
+        # 效率<0.5时权重为0，效率>0.9时权重达到base_weight
+        scale = np.clip((min_eff - 0.5) / 0.4, 0.0, 1.0)
+        return base_weight * scale
     
     def optimize(
         self,
@@ -154,28 +234,141 @@ class AdjointOptimizer:
                 )
                 noise = np.random.uniform(-0.05, 0.05, base.shape).astype(np.float32)
                 structure = np.clip(base + noise, 0, 1)
+            elif init_mode == "y_branch":
+                # Y型分支初始化
+                structure = np.zeros(
+                    (self.simulator.config.n_cells_x, self.simulator.config.n_cells_y),
+                    dtype=np.float32
+                )
+                nx, ny = structure.shape
+                
+                # 几何参数 (基于wg_width计算像素宽度，因为去掉了taper)
+                cfg = self.simulator.config
+                # 使用 wg_width 而不是 taper_width
+                wg_width_ratio = cfg.wg_width / cfg.mmi_width
+                radius_cells = (wg_width_ratio * ny) / 2
+                bar_half = max(1, int(round(radius_cells)))
+                
+                center_y = ny // 2
+                # 修改：输出端口移至角落
+                top_y = ny - bar_half
+                bot_y = bar_half
+                
+                # 修改：减少直波导长度
+                # 输入直波导缩减为 1/8 长度 (原为 1/3)
+                x_split = nx // 8
+                # 输出直波导缩减为 1/8 长度
+                x_merge = (7 * nx) // 8
+                
+                # 1. 输入直波导
+                structure[:x_split, center_y - bar_half : center_y + bar_half] = 1.0
+                
+                # 2. 分叉段 (平滑过渡)
+                for x in range(x_split, x_merge):
+                    # 归一化进度 t: 0 -> 1
+                    t = (x - x_split) / max(1, x_merge - x_split - 1)
+                    
+                    # 计算上下路径中心
+                    cy_top = int(round(center_y + t * (top_y - center_y)))
+                    cy_bot = int(round(center_y + t * (bot_y - center_y)))
+                    
+                    structure[x, cy_top - bar_half : cy_top + bar_half] = 1.0
+                    structure[x, cy_bot - bar_half : cy_bot + bar_half] = 1.0
+                
+                # 3. 输出直波导
+                structure[x_merge:, top_y - bar_half : top_y + bar_half] = 1.0
+                structure[x_merge:, bot_y - bar_half : bot_y + bar_half] = 1.0
+                
             else:
                 raise ValueError(f"Unknown initialization mode: {init_mode}")
         
         self._log("启动伴随法优化")
-        self._log(f"学习率: {self.learning_rate}")
+        self._log(f"初始学习率: {self.learning_rate}")
         self._log(f"最大迭代次数: {self.num_iterations}")
         self._log(f"阻尼系数: {self.damping}")
         self._log(f"初始化模式: {init_mode}")
         self._log(f"结构形状: {structure.shape}")
         if self.log_file:
             self._log(f"日志文件: {self.log_file}")
+            
+        # 可视化初始结构
+        if self.log_file:
+            init_save_path = self.log_file.parent / "initial_structure.png"
+            plot_structure(
+                structure, 
+                title=f"Initial Structure ({init_mode})", 
+                save_path=str(init_save_path),
+                config=self.simulator.config,
+                show=False
+            )
+            self._log(f"初始结构已保存到: {init_save_path}")
+            
         self._log("-" * 60)
         
         best_structure = structure.copy()
         best_fitness = -np.inf
         no_improve_count = 0
         
+        # 自适应学习率相关参数
+        current_lr = self.learning_rate
+        min_lr = self.learning_rate * 0.01  # 最小学习率为初始的1%
+        lr_decay = 0.5  # 学习率衰减因子
+        prev_fitness = -np.inf
+        prev_structure = structure.copy()
+        consecutive_drops = 0  # 连续下降计数
+        max_consecutive_drops = 3  # 允许的最大连续下降次数
+        
+        
         for iteration in range(self.num_iterations):
             # 1. 前向仿真：评估当前结构
-            binary_structure = (structure > 0.5).astype(int)
-            result = self.simulator.simulate(binary_structure, polarization="both")
-            fitness = self._fitness(result)
+            # 直接传入连续结构 (float array)，让 MEEP MaterialGrid 处理平滑过渡
+            # 这确保梯度计算和目标函数评估在同一"连续空间"中进行
+            result = self.simulator.simulate(structure, polarization="both")
+            
+            # === 效率Softmin + 自适应串扰惩罚 ===
+            # === 修改后的 FOM 定义 ===
+            # 目标：最大化目标端口的电场强度模平方 (即传输效率)
+            # TE -> Port 1 (Upper)
+            # TM -> Port 2 (Lower)
+            # FOM = TE_Port1 + TM_Port2
+            
+            # === 改进的 FOM 定义 ===
+            # 目标：最大化偶振分离效果
+            #
+            # FOM = (TE→P1 - TE→P2) + (TM→P2 - TM→P1)
+            #
+            # 物理意义：
+            # - TE→P1 - TE→P2: TE模式的分离度（正值表示TE主要去P1）
+            # - TM→P2 - TM→P1: TM模式的分离度（正值表示TM主要去P2）
+            #
+            # 这个FOM同时实现：
+            # 1. 最大化目标端口的 |E|²
+            # 2. 最小化串扰（泄漏到错误端口的能量）
+            # 3. 鼓励偶振态分离
+            
+            te_separation = result.te_port1 - result.te_port2
+            tm_separation = result.tm_port2 - result.tm_port1
+            fitness = te_separation + tm_separation
+            
+            # 梯度权重
+            # d(FOM)/d(te_port1) = +1 (鼓励增加)
+            # d(FOM)/d(te_port2) = -1 (鼓励减少)
+            # d(FOM)/d(tm_port2) = +1 (鼓励增加)
+            # d(FOM)/d(tm_port1) = -1 (鼓励减少)
+            current_weights = {
+                "te_port1": 1.0,
+                "te_port2": -1.0,
+                "tm_port2": 1.0,
+                "tm_port1": -1.0,
+            }
+            
+            # 计算消光比（用于日志显示，单位dB）
+            eps = 1e-8
+            er_te_db = 10 * np.log10((result.te_port1 + eps) / (result.te_port2 + eps))
+            er_tm_db = 10 * np.log10((result.tm_port2 + eps) / (result.tm_port1 + eps))
+            
+            # 更新 self.target_weights 供 compute_gradients 使用
+            self.target_weights = current_weights.copy()
             
             # 记录历史
             self.history["fitness"].append(fitness)
@@ -183,30 +376,61 @@ class AdjointOptimizer:
             self.history["tm_port2"].append(result.tm_port2)
             self.history["total_efficiency"].append(result.total_efficiency)
             self.history["crosstalk"].append(result.crosstalk)
+            self.history["er_te_db"].append(er_te_db)
+            self.history["er_tm_db"].append(er_tm_db)
             
             # 2. 检查是否改进
-            if fitness > best_fitness:
+            # 注意：在自适应权重调整过程中（如Softmin），fitness定义会变化，直接比较fitness可能不准。
+            # 这里我们依然比较fitness，因为我们希望Softmin值上升（代表最小效率上升）。
+            # 为了避免微小波动导致no_improve_count累积，增加一个容差
+            if fitness > best_fitness + 1e-6:
                 best_fitness = fitness
                 best_structure = structure.copy()
                 no_improve_count = 0
             else:
+                # 即使没有突破历史最佳，只要还在上升（或持平），也不算"无改进"
+                # 只有当性能明显下降或长期停滞时才计数
+                # 这里简化为：只要比上一步好（或者没变差太多），就重置局部计数
+                # 但为了逻辑严谨，我们保持原义：no_improve_count 指的是"距离上一次打破历史记录"的步数
                 no_improve_count += 1
+            
+            # === 自适应学习率：回退机制 ===
+            # 检测是否性能显著下降（相比上一步）
+            if iteration > 0 and fitness < prev_fitness - 0.05:  # 下降超过0.05视为显著
+                consecutive_drops += 1
+                if consecutive_drops >= max_consecutive_drops:
+                    # 回退到上一步的结构，并降低学习率
+                    structure = prev_structure.copy()
+                    current_lr = max(current_lr * lr_decay, min_lr)
+                    consecutive_drops = 0
+                    self._log(f"  >>> 检测到梯度崩溃，回退结构并降低学习率至 {current_lr:.6f}")
+            else:
+                consecutive_drops = 0
+            
+            # 保存当前状态用于下一步比较
+            prev_fitness = fitness
+            prev_structure = structure.copy()
             
             # 3. 计算梯度
             gradients = self.simulator.compute_gradients(
                 structure,
-                target_weights=self.target_weights
+                target_weights=current_weights
             )
             gradient_norm = np.linalg.norm(gradients)
             self.history["gradient_norm"].append(gradient_norm)
             
-            # 梯度归一化：控制最大更新步长
-            max_grad = np.max(np.abs(gradients))
-            if max_grad > 1e-8:
-                gradients = gradients / max_grad
+            # 梯度归一化：控制最大更新步长 (使用分位数避免奇异值影响)
+            # max_grad = np.max(np.abs(gradients))
+            # 使用99.9%分位数作为缩放基准，防止个别极端梯度值抑制整体更新
+            scale = np.percentile(np.abs(gradients), 99.9)
+            if scale > 1e-8:
+                gradients = gradients / scale
             
-            # 4. 梯度上升更新
-            update = self.learning_rate * gradients
+            # 裁剪过大的梯度值，确保稳定性
+            gradients = np.clip(gradients, -1.0, 1.0)
+            
+            # 4. 梯度上升更新（使用自适应学习率）
+            update = current_lr * gradients
             # 应用阻尼
             structure = structure + self.damping * update
             # 限制在[0, 1]
@@ -215,9 +439,10 @@ class AdjointOptimizer:
             # 5. 打印进度
             # if iteration % max(1, self.num_iterations // 10) == 0 or iteration == self.num_iterations - 1:
             self._log(
-                f"迭代 {iteration:3d} | 适应度: {fitness:7.4f} | "
-                f"TE→P1: {result.te_port1:6.4f} | TM→P2: {result.tm_port2:6.4f} | "
-                f"梯度范数: {gradient_norm:7.4f} | 无改进计数: {no_improve_count}"
+                f"迭代 {iteration:3d} | FOM: {fitness:7.3f} | "
+                f"TE→P1: {result.te_port1:.3f} | TM→P2: {result.tm_port2:.3f} | "
+                f"ER_TE: {er_te_db:5.1f}dB | ER_TM: {er_tm_db:5.1f}dB | "
+                f"LR: {current_lr:.5f}"
             )
             
             # 6. 早停
@@ -292,7 +517,9 @@ def run_adjoint_optimization(
         early_stop_patience=50,  # 增加耐心值
         log_path=log_path,
         seed=42,
-        verbose=True
+        verbose=True,
+        crosstalk_warmup_iters=30,
+        crosstalk_scale=0.3
     )
     
     return optimizer.optimize(init_mode=init_mode)
@@ -389,7 +616,8 @@ def plot_structure(
     structure: np.ndarray, 
     title: str = "Optimized Structure", 
     save_path: str = None,
-    config: Optional[Any] = None
+    config: Optional[Any] = None,
+    show: bool = True
 ):
     """
     绘制结构可视化 (支持物理尺寸坐标)
@@ -399,6 +627,7 @@ def plot_structure(
         title: 图标题
         save_path: 保存路径（可选）
         config: 仿真配置对象（用于获取物理尺寸）
+        show: 是否显示图像
     """
     fig, ax = plt.subplots(figsize=(10, 6))
     
@@ -439,7 +668,10 @@ def plot_structure(
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"结构图已保存到: {save_path}")
     
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def compare_random_vs_optimized(simulator: MMISimulator, optimized_structure: np.ndarray):
@@ -479,7 +711,7 @@ def compare_random_vs_optimized(simulator: MMISimulator, optimized_structure: np
     print(f"{'TM消光比':<25} {random_metrics['tm_extinction_ratio']:>6.2f} dB       {opt_metrics['tm_extinction_ratio']:>6.2f} dB")
 
 
-def save_results_to_file(adjoint_result: Dict[str, Any], save_dir: str = "./adjoint_results"):
+def save_results_to_file(adjoint_result: Dict[str, Any], save_dir: str = "./results/adjoint_results"):
     """
     保存伴随法优化结果到文件
     
@@ -531,7 +763,7 @@ def save_results_to_file(adjoint_result: Dict[str, Any], save_dir: str = "./adjo
 def main():
     """主函数"""
     # 定义保存目录
-    SAVE_DIR = "./adjoint_results"
+    SAVE_DIR = "./results/adjoint_results"
     os.makedirs(SAVE_DIR, exist_ok=True)
     
     # 1. 初始化仿真器
@@ -542,9 +774,9 @@ def main():
     print("\n运行伴随法优化...")
     adjoint_result = run_adjoint_optimization(
         simulator=simulator,
-        learning_rate=0.2,       # 归一化后，这是最大像素变化量
-        num_iterations=150,      # 增加迭代次数
-        init_mode="gray_noise",  # 使用灰度+噪声初始化
+        learning_rate=0.01,      # 降低学习率，避免振荡
+        num_iterations=200,      # 迭代次数
+        init_mode="half",        # 使用平衡初始化 (0.5 灰度)
         log_path=f"{SAVE_DIR}/adjoint_run.txt"
     )
     

@@ -305,69 +305,37 @@ class MMISimulator(Simulator):
         # 背景是 MatBg (通过default_material设置)
         
         # ============ 输入端 ============
-        # 输入直波导
-        input_wg_center_x = -sx/2 + cfg.pml_thickness + cfg.wg_length/2
+        # 输入直波导 (直接连接到 MMI 边缘)
+        # 长度 = wg_length + taper_length (保持总长度不变，或者只用 wg_length)
+        # 既然用户要求固定宽度的直波导，我们去掉锥形，直接延伸直波导
+        
+        # 为了保持仿真区域总尺寸一致，我们将原有的 taper 区域替换为直波导
+        # 总输入波导长度 = cfg.wg_length + cfg.taper_length
+        input_wg_len_total = cfg.wg_length + cfg.taper_length
+        input_wg_center_x = -cfg.mmi_length/2 - input_wg_len_total/2
+        
         geometry.append(mp.Block(
-            size=mp.Vector3(cfg.wg_length, cfg.wg_width, mp.inf),
+            size=mp.Vector3(input_wg_len_total, cfg.wg_width, mp.inf),
             center=mp.Vector3(input_wg_center_x, 0, 0),
             material=MatCore
         ))
         
-        # 输入锥形波导 (从 wg_width 渐变到 taper_width)
-        input_taper_center_x = -cfg.mmi_length/2 - cfg.taper_length/2
-        input_taper_vertices = [
-            mp.Vector3(input_taper_center_x - cfg.taper_length/2, -cfg.wg_width/2),
-            mp.Vector3(input_taper_center_x - cfg.taper_length/2, cfg.wg_width/2),
-            mp.Vector3(input_taper_center_x + cfg.taper_length/2, cfg.taper_width/2),
-            mp.Vector3(input_taper_center_x + cfg.taper_length/2, -cfg.taper_width/2),
-        ]
-        geometry.append(mp.Prism(
-            vertices=input_taper_vertices,
-            height=mp.inf,
-            material=MatCore
-        ))
-        
         # ============ 输出端 ============
+        # 输出端口位于 mmi_width/4 位置（标准 1×2 MMI 配置）
         output_y = cfg.mmi_width / 4
-        
-        # 输出锥形波导1 (上方, 从 taper_width 渐变到 wg_width)
-        output_taper_center_x = cfg.mmi_length/2 + cfg.taper_length/2
-        output_taper1_vertices = [
-            mp.Vector3(output_taper_center_x - cfg.taper_length/2, output_y - cfg.taper_width/2),
-            mp.Vector3(output_taper_center_x - cfg.taper_length/2, output_y + cfg.taper_width/2),
-            mp.Vector3(output_taper_center_x + cfg.taper_length/2, output_y + cfg.wg_width/2),
-            mp.Vector3(output_taper_center_x + cfg.taper_length/2, output_y - cfg.wg_width/2),
-        ]
-        geometry.append(mp.Prism(
-            vertices=output_taper1_vertices,
-            height=mp.inf,
-            material=MatCore
-        ))
+        output_wg_len_total = cfg.wg_length + cfg.taper_length
+        output_wg_center_x = cfg.mmi_length/2 + output_wg_len_total/2
         
         # 输出直波导1 (上方)
-        output_wg_center_x = sx/2 - cfg.pml_thickness - cfg.wg_length/2
         geometry.append(mp.Block(
-            size=mp.Vector3(cfg.wg_length, cfg.wg_width, mp.inf),
+            size=mp.Vector3(output_wg_len_total, cfg.wg_width, mp.inf),
             center=mp.Vector3(output_wg_center_x, output_y, 0),
-            material=MatCore
-        ))
-        
-        # 输出锥形波导2 (下方)
-        output_taper2_vertices = [
-            mp.Vector3(output_taper_center_x - cfg.taper_length/2, -output_y - cfg.taper_width/2),
-            mp.Vector3(output_taper_center_x - cfg.taper_length/2, -output_y + cfg.taper_width/2),
-            mp.Vector3(output_taper_center_x + cfg.taper_length/2, -output_y + cfg.wg_width/2),
-            mp.Vector3(output_taper_center_x + cfg.taper_length/2, -output_y - cfg.wg_width/2),
-        ]
-        geometry.append(mp.Prism(
-            vertices=output_taper2_vertices,
-            height=mp.inf,
             material=MatCore
         ))
         
         # 输出直波导2 (下方)
         geometry.append(mp.Block(
-            size=mp.Vector3(cfg.wg_length, cfg.wg_width, mp.inf),
+            size=mp.Vector3(output_wg_len_total, cfg.wg_width, mp.inf),
             center=mp.Vector3(output_wg_center_x, -output_y, 0),
             material=MatCore
         ))
@@ -466,7 +434,8 @@ class MMISimulator(Simulator):
         sources = [mp.Source(
             mp.ContinuousSource(frequency=fcen),
             component=src_component,
-            center=mp.Vector3(-sx/2 + cfg.pml_thickness + cfg.wg_length/2, 0, 0),
+            # source位置: 放在左侧直波导的起始处附近
+            center=mp.Vector3(input_wg_center_x - input_wg_len_total/2 + 0.5, 0, 0),
             size=mp.Vector3(0, cfg.wg_width * 2, 0)
         )]
         
@@ -484,29 +453,35 @@ class MMISimulator(Simulator):
         flux_freq = fcen
         nfreq = 1
         
-        # 输入通量 (在锥形波导之前，直波导末端)
+        # 通量监视器位置调整：直接放在直波导上
+        # 输入通量: 在源之后，MMI之前
+        flux_in_x = input_wg_center_x + input_wg_len_total/2 - 0.5 # 靠近MMI入口
+        
         flux_in = sim.add_flux(
             flux_freq, 0, nfreq,
             mp.FluxRegion(
-                center=mp.Vector3(-sx/2 + cfg.pml_thickness + cfg.wg_length + 0.1, 0, 0),
+                center=mp.Vector3(flux_in_x, 0, 0),
                 size=mp.Vector3(0, cfg.wg_width * 2, 0)
             )
         )
         
-        # 输出端口1通量 (上方, 在锥形波导之后)
+        # 输出通量: 在MMI之后直波导上
+        flux_out_x = output_wg_center_x - output_wg_len_total/2 + 0.5 # 靠近MMI出口
+        
+        # 输出端口1通量 (上方)
         flux_out1 = sim.add_flux(
             flux_freq, 0, nfreq,
             mp.FluxRegion(
-                center=mp.Vector3(sx/2 - cfg.pml_thickness - cfg.wg_length/2, output_y, 0),
+                center=mp.Vector3(flux_out_x, output_y, 0),
                 size=mp.Vector3(0, cfg.wg_width * 2, 0)
             )
         )
         
-        # 输出端口2通量 (下方, 在锥形波导之后)
+        # 输出端口2通量 (下方)
         flux_out2 = sim.add_flux(
             flux_freq, 0, nfreq,
             mp.FluxRegion(
-                center=mp.Vector3(sx/2 - cfg.pml_thickness - cfg.wg_length/2, -output_y, 0),
+                center=mp.Vector3(flux_out_x, -output_y, 0),
                 size=mp.Vector3(0, cfg.wg_width * 2, 0)
             )
         )
@@ -691,6 +666,7 @@ class MMISimulator(Simulator):
         
         # 光源设置
         fcen = 1 / cfg.wavelength
+        # 输出端口位于 mmi_width/4 位置
         output_y = cfg.mmi_width / 4
         
         if pol == "te":
@@ -1750,3 +1726,187 @@ class GreedyOptimizer:
             "history": history,
         }
 
+
+class PBSAdjointSetup:
+    """
+    Helper class to set up Adjoint Optimization for PBS.
+    Manages two separate simulations for TE and TM polarizations
+    that share the same geometric pattern (weights).
+    """
+    
+    def __init__(self, config):
+        self.config = config
+        self._check_meep()
+        
+    def _check_meep(self):
+        try:
+            import meep as mp
+            self.mp = mp
+        except ImportError:
+            raise ImportError("MEEP is required for Adjoint Optimization")
+
+    def get_effective_indices(self, pol: str):
+        """Calculate effective indices for a given polarization."""
+        # Use a temporary simulator instance to access the calculation method
+        # This avoids code duplication
+        temp_sim = MMISimulator(self.config)
+        n_si = self.config.n_si
+        n_sio2 = self.config.n_sio2
+        thickness = self.config.thickness
+        wavelength = self.config.wavelength
+        
+        n_eff_core = temp_sim.get_effective_index(n_si, n_sio2, thickness, pol, wavelength)
+        n_eff_bg = n_sio2 
+        
+        return n_eff_core, n_eff_bg
+
+    def create_single_pol_problem(self, pol: str, design_shape: tuple):
+        """
+        Create OptimizationProblem for a single polarization.
+        pol: 'te' or 'tm'
+        design_shape: (nx, ny) tuple for the grid
+        """
+        mp = self.mp
+        mpa = meep.adjoint
+        cfg = self.config
+        
+        # 1. Physics & Geometry setup
+        n_core, n_bg = self.get_effective_indices(pol)
+        MatCore = mp.Medium(index=n_core)
+        MatBg = mp.Medium(index=n_bg)
+        
+        # Simulation domain size
+        total_wg_length = cfg.wg_length + cfg.taper_length
+        sx = cfg.mmi_length + 2 * total_wg_length + 2 * cfg.pml_thickness
+        sy = cfg.mmi_width + 2 * cfg.pml_thickness
+        cell_size = mp.Vector3(sx, sy, 0)
+        
+        pml_layers = [mp.PML(cfg.pml_thickness)]
+        
+        # 2. Design Region (MaterialGrid)
+        # Note: weights=0 -> MatBg, weights=1 -> MatCore
+        design_grid = mp.MaterialGrid(
+            mp.Vector3(cfg.n_cells_x, cfg.n_cells_y),
+            MatBg, MatCore, weights=np.ones(design_shape)*0.5,
+            beta=1 # Will be updated during optimization
+        )
+        
+        design_region = mpa.DesignRegion(
+            design_grid,
+            volume=mp.Volume(
+                center=mp.Vector3(0, 0, 0),
+                size=mp.Vector3(cfg.mmi_length, cfg.mmi_width, 0)
+            )
+        )
+        
+        # 3. Static Geometry (Waveguides)
+        geometry = [
+            mp.Block(center=design_region.center, size=design_region.size, material=design_grid)
+        ]
+        
+        # Define coordinates
+        input_x_center = -sx/2 + cfg.pml_thickness + cfg.wg_length/2
+        output_x_center = sx/2 - cfg.pml_thickness - cfg.wg_length/2
+        input_taper_x = -cfg.mmi_length/2 - cfg.taper_length/2
+        output_taper_x = cfg.mmi_length/2 + cfg.taper_length/2
+        output_y_offset = cfg.mmi_width / 4
+        
+        # Input WG (Port 0)
+        geometry.append(mp.Block(size=mp.Vector3(cfg.wg_length*2, cfg.wg_width, mp.inf),
+                                 center=mp.Vector3(input_x_center, 0, 0), material=MatCore))
+        # Input Taper
+        geometry.append(mp.Prism(
+            vertices=[
+                mp.Vector3(input_taper_x - cfg.taper_length/2, -cfg.wg_width/2),
+                mp.Vector3(input_taper_x - cfg.taper_length/2, cfg.wg_width/2),
+                mp.Vector3(input_taper_x + cfg.taper_length/2, cfg.taper_width/2),
+                mp.Vector3(input_taper_x + cfg.taper_length/2, -cfg.taper_width/2),
+            ], height=mp.inf, material=MatCore))
+            
+        # Output Top (Port 1)
+        geometry.append(mp.Block(size=mp.Vector3(cfg.wg_length*2, cfg.wg_width, mp.inf),
+                                 center=mp.Vector3(output_x_center, output_y_offset, 0), material=MatCore))
+        geometry.append(mp.Prism(
+            vertices=[
+                mp.Vector3(output_taper_x - cfg.taper_length/2, output_y_offset - cfg.taper_width/2),
+                mp.Vector3(output_taper_x - cfg.taper_length/2, output_y_offset + cfg.taper_width/2),
+                mp.Vector3(output_taper_x + cfg.taper_length/2, output_y_offset + cfg.wg_width/2),
+                mp.Vector3(output_taper_x + cfg.taper_length/2, output_y_offset - cfg.wg_width/2),
+            ], height=mp.inf, material=MatCore))
+
+        # Output Bottom (Port 2)
+        geometry.append(mp.Block(size=mp.Vector3(cfg.wg_length*2, cfg.wg_width, mp.inf),
+                                 center=mp.Vector3(output_x_center, -output_y_offset, 0), material=MatCore))
+        geometry.append(mp.Prism(
+            vertices=[
+                mp.Vector3(output_taper_x - cfg.taper_length/2, -output_y_offset - cfg.taper_width/2),
+                mp.Vector3(output_taper_x - cfg.taper_length/2, -output_y_offset + cfg.taper_width/2),
+                mp.Vector3(output_taper_x + cfg.taper_length/2, -output_y_offset + cfg.wg_width/2),
+                mp.Vector3(output_taper_x + cfg.taper_length/2, -output_y_offset - cfg.wg_width/2),
+            ], height=mp.inf, material=MatCore))
+
+        # 4. Sources
+        fcen = 1 / cfg.wavelength
+        width = 0.2 * fcen 
+        fwidth = width
+        source_center = mp.Vector3(input_x_center, 0, 0)
+        source_size = mp.Vector3(0, cfg.wg_width*2, 0)
+        
+        # Source component: TE -> Hz, TM -> Ez
+        # Note: In 2D, TE usually means Hz polarization, TM means Ez polarization
+        src_comp = mp.Hz if pol.lower() == 'te' else mp.Ez
+        
+        sources = [mp.Source(mp.GaussianSource(fcen, fwidth=fwidth),
+                             component=src_comp,
+                             center=source_center,
+                             size=source_size)]
+        
+        # 5. Simulation
+        sim = mp.Simulation(
+            cell_size=cell_size,
+            boundary_layers=pml_layers,
+            geometry=geometry,
+            sources=sources,
+            default_material=MatBg,
+            resolution=cfg.resolution,
+        )
+        
+        # 6. Monitors
+        # Monitor component should match source
+        monitor_pos_1 = mp.Vector3(output_x_center, output_y_offset, 0)
+        monitor_pos_2 = mp.Vector3(output_x_center, -output_y_offset, 0)
+        monitor_size = mp.Vector3(0, cfg.wg_width*2, 0)
+        
+        monitor1 = mpa.FourierFields(sim, mp.Volume(center=monitor_pos_1, size=monitor_size), src_comp)
+        monitor2 = mpa.FourierFields(sim, mp.Volume(center=monitor_pos_2, size=monitor_size), src_comp)
+        
+        # 7. Objectives
+        # TE -> Maximize Port 1 (Top)
+        # TM -> Maximize Port 2 (Bottom)
+        
+        if pol.lower() == 'te':
+            def J_te(field1, field2):
+                return npa.sum(npa.abs(field1)**2) # Maximize Port 1
+            obj_funcs = [J_te]
+        else:
+            def J_tm(field1, field2):
+                return npa.sum(npa.abs(field2)**2) # Maximize Port 2
+            obj_funcs = [J_tm]
+
+        # Optimization Problem
+        opt = mpa.OptimizationProblem(
+            simulation=sim,
+            objective_functions=obj_funcs,
+            objective_arguments=[monitor1, monitor2],
+            design_regions=[design_region],
+            frequencies=[fcen],
+            decay_by=1e-3
+        )
+        
+        return opt, design_grid
+
+    def create_adjoint_problems(self):
+        shape = (self.config.n_cells_x, self.config.n_cells_y)
+        opt_te, grid_te = self.create_single_pol_problem('te', shape)
+        opt_tm, grid_tm = self.create_single_pol_problem('tm', shape)
+        return opt_te, opt_tm, grid_te, grid_tm
