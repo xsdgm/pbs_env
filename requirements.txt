@@ -1,0 +1,9 @@
+numpy
+gymnasium
+stable-baselines3
+matplotlib
+PyYAML
+tqdm
+
+# Note: pymeep is required for simulations but is typically installed via Conda.
+# conda install -c conda-forge pymeep

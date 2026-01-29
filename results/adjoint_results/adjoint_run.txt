@@ -1,0 +1,24 @@
+启动伴随法优化
+初始学习率: 0.05
+最大迭代次数: 200
+阻尼系数: 0.5
+初始化模式: random
+结构形状: (120, 48)
+日志文件: adjoint_results/adjoint_run.txt
+初始结构已保存到: adjoint_results/initial_structure.png
+------------------------------------------------------------
+迭代   0 | FOM:  -0.031 | TE→P1: 0.160 | TM→P2: 0.178 | ER_TE:   2.6dB | ER_TM:  -2.0dB | LR: 0.05000
+迭代   1 | FOM:  -0.017 | TE→P1: 0.164 | TM→P2: 0.167 | ER_TE:   3.4dB | ER_TM:  -2.1dB | LR: 0.05000
+迭代   2 | FOM:   0.005 | TE→P1: 0.176 | TM→P2: 0.156 | ER_TE:   4.6dB | ER_TM:  -2.3dB | LR: 0.05000
+迭代   3 | FOM:   0.027 | TE→P1: 0.191 | TM→P2: 0.145 | ER_TE:   5.7dB | ER_TM:  -2.5dB | LR: 0.05000
+迭代   4 | FOM:   0.042 | TE→P1: 0.215 | TM→P2: 0.152 | ER_TE:   4.7dB | ER_TM:  -2.2dB | LR: 0.05000
+迭代   5 | FOM:   0.042 | TE→P1: 0.219 | TM→P2: 0.139 | ER_TE:   4.8dB | ER_TM:  -2.4dB | LR: 0.05000
+迭代   6 | FOM:   0.064 | TE→P1: 0.206 | TM→P2: 0.146 | ER_TE:   5.4dB | ER_TM:  -1.9dB | LR: 0.05000
+迭代   7 | FOM:   0.052 | TE→P1: 0.202 | TM→P2: 0.135 | ER_TE:   4.9dB | ER_TM:  -2.1dB | LR: 0.05000
+迭代   8 | FOM:   0.034 | TE→P1: 0.194 | TM→P2: 0.124 | ER_TE:   4.1dB | ER_TM:  -2.3dB | LR: 0.05000
+迭代   9 | FOM:   0.015 | TE→P1: 0.186 | TM→P2: 0.114 | ER_TE:   3.4dB | ER_TM:  -2.4dB | LR: 0.05000
+迭代  10 | FOM:  -0.002 | TE→P1: 0.181 | TM→P2: 0.104 | ER_TE:   2.7dB | ER_TM:  -2.6dB | LR: 0.05000
+迭代  11 | FOM:  -0.019 | TE→P1: 0.177 | TM→P2: 0.095 | ER_TE:   2.2dB | ER_TM:  -2.9dB | LR: 0.05000
+迭代  12 | FOM:  -0.032 | TE→P1: 0.175 | TM→P2: 0.087 | ER_TE:   1.7dB | ER_TM:  -3.0dB | LR: 0.05000
+迭代  13 | FOM:  -0.039 | TE→P1: 0.177 | TM→P2: 0.082 | ER_TE:   1.4dB | ER_TM:  -3.2dB | LR: 0.05000
+迭代  14 | FOM:  -0.036 | TE→P1: 0.184 | TM→P2: 0.078 | ER_TE:   1.4dB | ER_TM:  -3.2dB | LR: 0.05000
