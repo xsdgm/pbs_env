@@ -5,7 +5,9 @@ MMI PBS 强化学习环境
 目标：TE模式输出到端口1，TM模式输出到端口2。
 """
 
+import os
 import numpy as np
+import yaml
 from typing import Optional, Tuple, Dict, Any
 from functools import partial
 
@@ -58,12 +60,41 @@ class MeepMMIPBS(gym.Env):
         """
         config, num_workers = load_simulation_config(config_path)
         simulator = MMISimulator(config=config, num_workers=num_workers)
+
+        extra_cfg = {}
+        if config_path:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    extra_cfg = yaml.safe_load(f) or {}
+            except FileNotFoundError:
+                extra_cfg = {}
         
         env_kwargs = {
             'n_cells_x': config.n_cells_x,
             'n_cells_y': config.n_cells_y,
             'simulator': simulator,
         }
+
+        # 读取可选的环境/训练参数
+        reward_cfg = (extra_cfg.get("reward", {}) or {})
+        env_kwargs.update({
+            "init_mode": (extra_cfg.get("structure", {}) or {}).get("init_mode", "random"),
+            "reward_alpha": reward_cfg.get("alpha", 1.0),
+            "reward_beta": reward_cfg.get("beta", 1.0),
+            "reward_gamma": reward_cfg.get("gamma", 0.5),
+            "reward_type": reward_cfg.get("type", "absolute"),
+        })
+
+        rl_cfg = (extra_cfg.get("rl", {}) or {})
+        logging_cfg = (extra_cfg.get("logging", {}) or {})
+        env_kwargs.update({
+            "adjoint_cost": rl_cfg.get("adjoint_cost", 0.5),
+            "flip_cost": rl_cfg.get("flip_cost", 0.01),
+            "adjoint_steps": rl_cfg.get("adjoint_steps", 5),
+            "adjoint_lr": rl_cfg.get("adjoint_lr", 0.01),
+            "adjoint_target_weights": rl_cfg.get("adjoint_target_weights", None),
+            "log_dir": logging_cfg.get("log_dir", "./results/rl_adjoint_results"),
+        })
         env_kwargs.update(kwargs)
         return cls(**env_kwargs)
     
@@ -91,6 +122,19 @@ class MeepMMIPBS(gym.Env):
         reward_beta: float = 1.0,   # TM_port2权重
         reward_gamma: float = 0.5,  # 串扰惩罚权重
         reward_type: str = "absolute",  # "absolute" or "delta"
+        reward_mode: str = "barrel",  # "barrel" | "sum" | "min_er"
+        curriculum_steps: Tuple[int, int] = (1000, 3000),
+        curriculum_beta: float = 0.5,
+
+        # 伴随法（超级动作）参数
+        adjoint_cost: float = 0.5,
+        flip_cost: float = 0.01,
+        adjoint_steps: int = 5,
+        adjoint_lr: float = 0.01,
+        adjoint_target_weights: Optional[Dict[str, float]] = None,
+
+        # 日志
+        log_dir: Optional[str] = "./results/rl_adjoint_results",
         
         # 渲染
         render_mode: Optional[str] = None,
@@ -130,7 +174,24 @@ class MeepMMIPBS(gym.Env):
         self.reward_beta = reward_beta
         self.reward_gamma = reward_gamma
         self.reward_type = reward_type
+        self.reward_mode = reward_mode
+        self.curriculum_steps = curriculum_steps
+        self.curriculum_beta = curriculum_beta
         self.render_mode = render_mode
+
+        # 伴随法参数
+        self.adjoint_cost = adjoint_cost
+        self.flip_cost = flip_cost
+        self.adjoint_steps = adjoint_steps
+        self.adjoint_lr = adjoint_lr
+        self.adjoint_target_weights = adjoint_target_weights or {
+            "te_port1": 1.0,
+            "tm_port2": 1.0,
+        }
+
+        # 日志
+        self.log_dir = log_dir
+        self.episode_index = 0
         
         if simulator is not None:
             self.simulator = simulator
@@ -149,20 +210,21 @@ class MeepMMIPBS(gym.Env):
         
         # 定义观察空间
         self.observation_space = spaces.Box(
-            low=0.0,
-            high=1.0,
-            shape=(n_cells_x, n_cells_y),
+            low=-np.inf,
+            high=np.inf,
+            shape=(2, self.n_cells_x, self.n_cells_y),
             dtype=np.float32
         )
         
         # 定义动作空间 (离散：翻转某个像素)
-        self.action_space = spaces.Discrete(self.n_cells)
+        self.action_space = spaces.Discrete(self.n_cells + 1)
         
         # 状态变量
         self.structure = None
         self.current_results = None
         self.prev_reward = 0.0
         self.step_count = 0
+        self.last_action_was_adjoint = False
         
         # 性能追踪
         self.best_reward = -np.inf
@@ -202,6 +264,13 @@ class MeepMMIPBS(gym.Env):
         self.step_count = 0
         self.prev_reward = self._compute_reward()
         self.episode_rewards = []
+        self.last_action_was_adjoint = False
+
+        # 日志目录
+        if self.log_dir:
+            os.makedirs(self.log_dir, exist_ok=True)
+            self._ensure_log_header()
+            self.episode_index += 1
         
         # 获取观察和信息
         obs = self._get_observation()
@@ -223,12 +292,22 @@ class MeepMMIPBS(gym.Env):
             truncated: 是否截断
             info: 信息字典
         """
-        # 解析动作
-        x = action // self.n_cells_y
-        y = action % self.n_cells_y
-        
-        # 翻转像素
-        self.structure[x, y] = 1.0 - self.structure[x, y]
+        cost = 0.0
+        action_type = "flip"
+
+        # 分支 1: 伴随法超级动作
+        if action == self.n_cells:
+            self._run_adjoint_optimization(steps=self.adjoint_steps)
+            cost = self.adjoint_cost
+            action_type = "adjoint"
+            self.last_action_was_adjoint = True
+        else:
+            # 分支 2: 翻转像素
+            x = action // self.n_cells_y
+            y = action % self.n_cells_y
+            self.structure[x, y] = 1.0 - self.structure[x, y]
+            cost = self.flip_cost
+            self.last_action_was_adjoint = False
         
         # 运行仿真
         self.current_results = self.simulator.simulate(self.structure)
@@ -236,9 +315,9 @@ class MeepMMIPBS(gym.Env):
         # 计算奖励
         current_reward = self._compute_reward()
         if self.reward_type == "delta":
-            reward = current_reward - self.prev_reward
+            reward = current_reward - self.prev_reward - cost
         else:
-            reward = current_reward
+            reward = current_reward - cost
         
         self.prev_reward = current_reward
         self.episode_rewards.append(reward)
@@ -247,6 +326,7 @@ class MeepMMIPBS(gym.Env):
         if current_reward > self.best_reward:
             self.best_reward = current_reward
             self.best_structure = self.structure.copy()
+            self._save_best_results()
         
         # 更新步数
         self.step_count += 1
@@ -254,6 +334,13 @@ class MeepMMIPBS(gym.Env):
         # 获取观察和信息
         obs = self._get_observation()
         info = self._get_info()
+        info.update({
+            "action_type": action_type,
+            "action_cost": cost,
+            "last_action_was_adjoint": self.last_action_was_adjoint,
+        })
+
+        self._log_step(action=action, action_type=action_type, reward=reward, cost=cost)
         
         # terminated 和 truncated
         terminated = False  # 没有自然终止条件
@@ -284,22 +371,72 @@ class MeepMMIPBS(gym.Env):
     
     def _get_observation(self) -> np.ndarray:
         """获取观察"""
-        return self.structure.copy()
+        gradients = self.simulator.compute_gradients(
+            self.structure,
+            target_weights=self.adjoint_target_weights
+        ).astype(np.float32)
+        obs = np.stack([self.structure.astype(np.float32), gradients], axis=0)
+        return obs
+
+    def _run_adjoint_optimization(self, steps: int = 5):
+        """运行伴随法优化若干步"""
+        for _ in range(max(1, steps)):
+            gradients = self.simulator.compute_gradients(
+                self.structure,
+                target_weights=self.adjoint_target_weights
+            )
+            gradients = self._normalize_gradients(gradients)
+            self.structure = np.clip(self.structure + self.adjoint_lr * gradients, 0.0, 1.0)
+
+    def _normalize_gradients(self, gradients: np.ndarray) -> np.ndarray:
+        """归一化并裁剪梯度"""
+        scale = np.percentile(np.abs(gradients), 99.9)
+        if scale > 1e-8:
+            gradients = gradients / scale
+        gradients = np.clip(gradients, -1.0, 1.0)
+        return gradients
     
     def _compute_reward(self) -> float:
         """计算奖励"""
         if self.current_results is None:
             return 0.0
-        
-        # current_results 现在是 SimulationResult 对象
+
+        te_p1 = self.current_results.te_port1
+        tm_p2 = self.current_results.tm_port2
+        te_p2 = self.current_results.te_port2
+        tm_p1 = self.current_results.tm_port1
+
+        # Curriculum Learning
+        # 阶段1: 仅优化通光
+        # 阶段2: 加入串扰惩罚
+        # 阶段3: 预留（可加入二值化/工艺约束）
+        step_1, step_2 = self.curriculum_steps
+        if self.reward_mode == "barrel":
+            if self.step_count < step_1:
+                return float(te_p1 + tm_p2)
+            if self.step_count < step_2:
+                return float((te_p1 + tm_p2) - self.curriculum_beta * (te_p2 + tm_p1))
+
+            # 第三阶段：使用“木桶效应”+串扰惩罚
+            return float((te_p1 * tm_p2) - self.reward_gamma * (te_p2 + tm_p1))
+
+        if self.reward_mode == "min_er":
+            # min(T) * log10(ER) 变体
+            eps = 1e-10
+            er_te = (te_p1 + eps) / (te_p2 + eps)
+            er_tm = (tm_p2 + eps) / (tm_p1 + eps)
+            er = min(er_te, er_tm)
+            return float(min(te_p1, tm_p2) * np.log10(er + eps))
+
+        # 默认：求和 + 串扰惩罚
         return compute_reward(
-            te_port1=self.current_results.te_port1,
-            tm_port2=self.current_results.tm_port2,
-            te_port2=self.current_results.te_port2,
-            tm_port1=self.current_results.tm_port1,
+            te_port1=te_p1,
+            tm_port2=tm_p2,
+            te_port2=te_p2,
+            tm_port1=tm_p1,
             alpha=self.reward_alpha,
             beta=self.reward_beta,
-            gamma=self.reward_gamma
+            gamma=self.reward_gamma,
         )
     
     def _get_info(self) -> Dict[str, Any]:
@@ -330,6 +467,52 @@ class MeepMMIPBS(gym.Env):
             info["tm_extinction_ratio_dB"] = tm_er
         
         return info
+
+    def _ensure_log_header(self):
+        """确保日志文件有表头"""
+        log_path = os.path.join(self.log_dir, "rl_adjoint_run.csv")
+        if not os.path.exists(log_path):
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "episode,step,action,action_type,reward,cost,"
+                    "te_port1,tm_port2,te_port2,tm_port1,total_efficiency,crosstalk\n"
+                )
+
+    def _log_step(self, action: int, action_type: str, reward: float, cost: float):
+        """记录单步日志"""
+        if not self.log_dir:
+            return
+        log_path = os.path.join(self.log_dir, "rl_adjoint_run.csv")
+        te_p1 = self.current_results.te_port1 if self.current_results else 0.0
+        tm_p2 = self.current_results.tm_port2 if self.current_results else 0.0
+        te_p2 = self.current_results.te_port2 if self.current_results else 0.0
+        tm_p1 = self.current_results.tm_port1 if self.current_results else 0.0
+        total_eff = self.current_results.total_efficiency if self.current_results else 0.0
+        crosstalk = self.current_results.crosstalk if self.current_results else 0.0
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"{self.episode_index},{self.step_count},{action},{action_type},"
+                f"{reward:.6f},{cost:.6f},{te_p1:.6f},{tm_p2:.6f},"
+                f"{te_p2:.6f},{tm_p1:.6f},{total_eff:.6f},{crosstalk:.6f}\n"
+            )
+
+    def _save_best_results(self):
+        """保存最佳结构与指标"""
+        if not self.log_dir or self.best_structure is None or self.current_results is None:
+            return
+        os.makedirs(self.log_dir, exist_ok=True)
+        np.save(os.path.join(self.log_dir, "best_structure_rl.npy"), self.best_structure)
+        with open(os.path.join(self.log_dir, "rl_best_performance.txt"), "w", encoding="utf-8") as f:
+            f.write("RL + Adjoint 最佳结果\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"Best Reward: {self.best_reward:.6f}\n")
+            f.write(f"TE→Port1: {self.current_results.te_port1:.6f}\n")
+            f.write(f"TM→Port2: {self.current_results.tm_port2:.6f}\n")
+            f.write(f"TE→Port2: {self.current_results.te_port2:.6f}\n")
+            f.write(f"TM→Port1: {self.current_results.tm_port1:.6f}\n")
+            f.write(f"Total Efficiency: {self.current_results.total_efficiency:.6f}\n")
+            f.write(f"Crosstalk: {self.current_results.crosstalk:.6f}\n")
     
     def render(self):
         """渲染环境"""

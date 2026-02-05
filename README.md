@@ -180,6 +180,26 @@ python baseline/adjoint_design.py
 python baseline/genetic_algorithm_design.py
 ```
 
+## 强化学习 + 伴随法 (Hybrid)
+
+先用强化学习进行全局探索，再用伴随法进行局部精细优化：
+
+```bash
+conda activate mmi-rl
+python baseline/rl_adjoint_design.py --timesteps 20000 --adjoint-iters 120
+```
+
+可选参数示例：
+
+```bash
+python baseline/rl_adjoint_design.py \
+    --config configs/default_config.yaml \
+    --conda-env mmi-rl \
+    --timesteps 50000 \
+    --adjoint-iters 200 \
+    --adjoint-lr 0.01
+```
+
 ## 文件结构
 
 ```

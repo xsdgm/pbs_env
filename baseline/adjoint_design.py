@@ -84,6 +84,10 @@ class AdjointOptimizer:
         self.crosstalk_warmup_iters = max(0, int(crosstalk_warmup_iters))
         self.crosstalk_scale = float(crosstalk_scale)
         
+        # 消光比惩罚系数（用于伴随法FOM）
+        self.alpha_penalty = 1.0  # TE→P2 惩罚系数
+        self.beta_penalty = 1.0   # TM→P1 惩罚系数
+        
         # 优化历史
         self.history = {
             "fitness": [],
@@ -332,34 +336,34 @@ class AdjointOptimizer:
             # TM -> Port 2 (Lower)
             # FOM = TE_Port1 + TM_Port2
             
-            # === 改进的 FOM 定义 ===
-            # 目标：最大化偶振分离效果
+            # === 消光比优化 FOM ===
+            # 目标：在奖励目标信号的同时惩罚错误端口信号
             #
-            # FOM = (TE→P1 - TE→P2) + (TM→P2 - TM→P1)
+            # FOM = (T_TE→P1 - α·T_TE→P2) + (T_TM→P2 - β·T_TM→P1)
             #
             # 物理意义：
-            # - TE→P1 - TE→P2: TE模式的分离度（正值表示TE主要去P1）
-            # - TM→P2 - TM→P1: TM模式的分离度（正值表示TM主要去P2）
+            # - 第一项：奖励TE去P1，同时惩罚TE去P2（消光比优化）
+            # - 第二项：奖励TM去P2，同时惩罚TM去P1（消光比优化）
             #
-            # 这个FOM同时实现：
-            # 1. 最大化目标端口的 |E|²
-            # 2. 最小化串扰（泄漏到错误端口的能量）
-            # 3. 鼓励偶振态分离
+            # 伴随源设置（相位控制技巧）：
+            # - TE Case: Port1 发射 +1 幅度，Port2 发射 -α 幅度（相位相反）
+            # - TM Case: Port2 发射 +1 幅度，Port1 发射 -β 幅度（相位相反）
+            # 优点：一次伴随仿真即可同时计算"增加目标+减少串扰"的梯度
             
-            te_separation = result.te_port1 - result.te_port2
-            tm_separation = result.tm_port2 - result.tm_port1
+            te_separation = result.te_port1 - self.alpha_penalty * result.te_port2
+            tm_separation = result.tm_port2 - self.beta_penalty * result.tm_port1
             fitness = te_separation + tm_separation
             
-            # 梯度权重
-            # d(FOM)/d(te_port1) = +1 (鼓励增加)
-            # d(FOM)/d(te_port2) = -1 (鼓励减少)
-            # d(FOM)/d(tm_port2) = +1 (鼓励增加)
-            # d(FOM)/d(tm_port1) = -1 (鼓励减少)
+            # 梯度权重（对应伴随源配置）
+            # d(FOM)/d(te_port1) = +1.0 (Port1 发射 +1)
+            # d(FOM)/d(te_port2) = -α  (Port2 发射 -α)
+            # d(FOM)/d(tm_port2) = +1.0 (Port2 发射 +1)
+            # d(FOM)/d(tm_port1) = -β  (Port1 发射 -β)
             current_weights = {
                 "te_port1": 1.0,
-                "te_port2": -1.0,
+                "te_port2": -self.alpha_penalty,
                 "tm_port2": 1.0,
-                "tm_port1": -1.0,
+                "tm_port1": -self.beta_penalty,
             }
             
             # 计算消光比（用于日志显示，单位dB）
