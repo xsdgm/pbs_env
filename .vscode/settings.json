@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^/home/kylin/miniconda3/bin/conda run -n pbs_chip_env python /home/kylin/pbs_env/train_haac\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
